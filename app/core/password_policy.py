@@ -33,12 +33,17 @@ def _normalize_password(value: str) -> str:
     return value.strip().lower()
 
 
+BCRYPT_MAX_LENGTH = 72
+
+
 def validate_password_easy(
     password: str,
     minimum_length: int,
 ) -> str | None:
     if len(password) < minimum_length:
         return f"Le mot de passe doit contenir au moins {minimum_length} caractères."
+    if len(password) > BCRYPT_MAX_LENGTH:
+        return f"Le mot de passe ne doit pas dépasser {BCRYPT_MAX_LENGTH} caractères."
     if not _HAS_LETTER_RE.search(password):
         return "Le mot de passe doit contenir au moins une lettre."
     if not _HAS_DIGIT_RE.search(password):

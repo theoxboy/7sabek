@@ -1,7 +1,13 @@
+from __future__ import annotations
+
+import logging
+import warnings
 from functools import lru_cache
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("app.config")
 
 
 class Settings(BaseSettings):
@@ -13,7 +19,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_exp_minutes: int = 30
     refresh_token_exp_days: int = 14
-    cookie_secure: bool = False
+    cookie_secure: Optional[bool] = None
+    session_max_age_days: int = 30
     backup_storage_dir: str = "/opt/backups/floussy"
     backup_retention_count: int = 1
     backup_schedule_days: int = 15
@@ -35,6 +42,26 @@ class Settings(BaseSettings):
     )
 
 
+    @property
+    def resolved_cookie_secure(self) -> bool:
+        if self.cookie_secure is not None:
+            return self.cookie_secure
+        return self.environment.strip().lower() not in {"local", "development", "dev", "test"}
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.jwt_secret == "change-me":
+        env = settings.environment.strip().lower()
+        if env not in {"local", "development", "dev", "test"}:
+            raise RuntimeError(
+                "JWT_SECRET must be set to a strong secret in non-local environments. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+            )
+        warnings.warn(
+            "JWT_SECRET is set to the default 'change-me'. "
+            "This is only acceptable for local development.",
+            stacklevel=2,
+        )
+    return settings

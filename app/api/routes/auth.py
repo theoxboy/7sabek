@@ -192,7 +192,7 @@ def _set_auth_cookies(response: Response, user_id: str) -> None:
         "access_token",
         access_token,
         httponly=True,
-        secure=settings.cookie_secure,
+        secure=settings.resolved_cookie_secure,
         samesite="lax",
         max_age=settings.access_token_exp_minutes * 60,
         path="/",
@@ -201,7 +201,7 @@ def _set_auth_cookies(response: Response, user_id: str) -> None:
         "refresh_token",
         refresh_token,
         httponly=True,
-        secure=settings.cookie_secure,
+        secure=settings.resolved_cookie_secure,
         samesite="lax",
         max_age=settings.refresh_token_exp_days * 24 * 60 * 60,
         path="/",
@@ -214,7 +214,7 @@ def _set_superadmin_session_cookie(response: Response, token: str) -> None:
         SUPERADMIN_SESSION_COOKIE,
         token,
         httponly=True,
-        secure=settings.cookie_secure,
+        secure=settings.resolved_cookie_secure,
         samesite="lax",
         max_age=settings.refresh_token_exp_days * 24 * 60 * 60,
         path="/",
@@ -913,7 +913,7 @@ async def request_password_reset(
             logger.exception("Failed to send password reset email for user=%s", user.id)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Password reset email delivery failed: {exc}",
+                detail="Password reset email delivery failed. Please try again later.",
             ) from exc
         return StatusOut(
             status="ok",
