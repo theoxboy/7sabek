@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from fastapi import Depends, HTTPException, Request, status
 from uuid import UUID
@@ -19,6 +20,8 @@ from app.core.superadmin_session import (
     require_active_account_session,
     require_active_superadmin_session,
 )
+
+logger = logging.getLogger("app.deps")
 
 async def get_current_user(
     request: Request,
@@ -103,6 +106,16 @@ async def get_current_user(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="User not found",
                 )
+            logger.info(
+                "superadmin_impersonation admin_id=%s admin_email=%s "
+                "target_id=%s target_email=%s method=%s path=%s",
+                user.id,
+                user.email,
+                target_user.id,
+                target_user.email,
+                request.method,
+                request.url.path,
+            )
             return target_user
 
     return user

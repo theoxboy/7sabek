@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 MAX_PROFILE_PHOTO_UPLOAD_BYTES = 13 * 1024 * 1024
 MAX_PROFILE_PHOTO_DATA_URL_LENGTH = 25_000_000
+MAX_PROFILE_PHOTO_PIXELS = 25_000_000
 _DATA_IMAGE_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.DOTALL)
 
 
@@ -47,6 +48,7 @@ def normalize_profile_photo_url(value: Optional[str]) -> Optional[str]:
         return trimmed
 
     try:
+        Image.MAX_IMAGE_PIXELS = MAX_PROFILE_PHOTO_PIXELS
         image = Image.open(io.BytesIO(binary))
         image = ImageOps.exif_transpose(image)
     except Exception as exc:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import secrets
 
@@ -119,6 +119,16 @@ async def require_active_account_session(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=revoked_detail,
+        )
+    from app.core.config import get_settings
+    settings = get_settings()
+    max_age = timedelta(days=settings.session_max_age_days)
+    if session.created_at and (datetime.now(timezone.utc) - session.created_at) > max_age:
+        session.revoked_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please log in again.",
         )
     if touch:
         session.last_seen_at = datetime.now(timezone.utc)

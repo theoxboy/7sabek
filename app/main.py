@@ -15,6 +15,8 @@ from app.core.platform_settings import get_platform_settings
 from app.core.rate_limit import build_rate_limit_message, check_rate_limit, get_client_ip
 from app.db.session import get_sessionmaker
 
+MAX_REQUEST_BODY_BYTES = 15 * 1024 * 1024  # 15 MB
+
 
 def _append_cors_headers(response: JSONResponse, origin: str, allow_origin_regex: str) -> JSONResponse:
     if origin and re.match(allow_origin_regex, origin):
@@ -31,16 +33,25 @@ def create_app() -> FastAPI:
     environment = settings.environment.strip().lower()
     is_test_env = environment == "test"
     is_local_env = environment in {"local", "development", "dev"}
-    allow_origin_regex = (
-        r"^https?://("
-        r"localhost|127\.0\.0\.1|76\.13\.112\.16|"
-        r"10(?:\.\d{1,3}){3}|"
-        r"192\.168(?:\.\d{1,3}){2}|"
-        r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|"
-        r"[A-Za-z0-9-]+\.local|"
-        r"floussy\.online|www\.floussy\.online|api\.floussy\.online"
-        r")(:\d+)?$"
-    )
+    is_production = environment in {"production", "prod"}
+
+    if is_production:
+        allow_origin_regex = (
+            r"^https://("
+            r"floussy\.online|www\.floussy\.online|api\.floussy\.online"
+            r")$"
+        )
+    else:
+        allow_origin_regex = (
+            r"^https?://("
+            r"localhost|127\.0\.0\.1|"
+            r"10(?:\.\d{1,3}){3}|"
+            r"192\.168(?:\.\d{1,3}){2}|"
+            r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|"
+            r"[A-Za-z0-9-]+\.local|"
+            r"floussy\.online|www\.floussy\.online|api\.floussy\.online"
+            r")(:\d+)?$"
+        )
 
     configure_logging()
     logger = logging.getLogger("app.cors")
@@ -58,6 +69,49 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=(self), payment=()"
+        )
+        if not is_local_env and not is_test_env:
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=63072000; includeSubDomains"
+            )
+        return response
+
+    @app.middleware("http")
+    async def body_size_limit(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_REQUEST_BODY_BYTES:
+            return JSONResponse(
+                {"detail": "Request body too large."},
+                status_code=413,
+            )
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def csrf_protection(request: Request, call_next):
+        if request.method in {"GET", "HEAD", "OPTIONS"}:
+            return await call_next(request)
+        origin = request.headers.get("origin", "").strip()
+        if origin and not re.match(allow_origin_regex, origin):
+            logger.warning(
+                "CSRF: blocked request with untrusted origin=%s path=%s",
+                origin,
+                request.url.path,
+            )
+            response = JSONResponse(
+                {"detail": "Forbidden: untrusted origin."},
+                status_code=403,
+            )
+            return response
+        return await call_next(request)
 
     @app.middleware("http")
     async def backup_guard(request, call_next):
