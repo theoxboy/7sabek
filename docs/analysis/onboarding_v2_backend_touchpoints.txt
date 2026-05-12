@@ -1,0 +1,22 @@
+### Frontend API calls from onboarding page
+12434:        await apiFetch("/users/me/onboarding-v2-records/latest", {
+12542:      await apiFetch("/users/me/onboarding-v2-records/latest/apply", {
+
+### Backend onboarding endpoints
+app/models/onboarding_v2_record.py:16:    __tablename__ = "onboarding_v2_records"
+app/models/onboarding_v2_record.py:44:    user = relationship("User", back_populates="onboarding_v2_records")
+app/services/onboarding_v2_apply.py:277:async def apply_onboarding_v2_payload(
+app/api/routes/auth.py:42:    apply_onboarding_v2_payload,
+app/api/routes/auth.py:417:            summary = await apply_onboarding_v2_payload(
+app/api/routes/auth.py:488:        summary = await apply_onboarding_v2_payload(
+app/api/routes/users.py:35:    apply_onboarding_v2_payload,
+app/api/routes/users.py:432:    "/me/onboarding-v2-records",
+app/api/routes/users.py:464:@router.put("/me/onboarding-v2-records/latest", response_model=OnboardingV2RecordOut)
+app/api/routes/users.py:512:    "/me/onboarding-v2-records/latest/apply",
+app/api/routes/users.py:534:    summary = await apply_onboarding_v2_payload(
+app/api/routes/users.py:548:@router.get("/me/onboarding-v2-records", response_model=list[OnboardingV2RecordOut])
+app/api/routes/users.py:549:async def list_my_onboarding_v2_records(
+app/api/routes/users.py:614:    "/admin/onboarding-v2-records",
+app/api/routes/users.py:617:async def list_admin_onboarding_v2_records(
+app/api/routes/users.py:651:    "/{user_id}/onboarding-v2-records",
+app/api/routes/users.py:654:async def list_user_onboarding_v2_records(
