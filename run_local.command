@@ -23,6 +23,12 @@ if [ ! -f ".env" ] && [ -f ".env.example" ]; then
   cp .env.example .env
 fi
 
+if [ -f ".env" ]; then
+  set -a
+  source ".env"
+  set +a
+fi
+
 docker compose up -d
 
 PY_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"

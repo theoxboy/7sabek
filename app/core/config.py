@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     password_reset_path: str = "/reset-password"
     password_reset_token_ttl_minutes: int = 5
     password_reset_delivery_retries: int = 3
+    superadmin_email: Optional[str] = None
+    superadmin_password: Optional[str] = None
+    superadmin_currency: str = "MAD"
+    superadmin_sweep_interval_days: int = 30
     superadmin_password_reset_code: str = "4303"
     superadmin_password_reset_first_name: str = "OMAR"
     mailtrap_api_token: Optional[str] = None
