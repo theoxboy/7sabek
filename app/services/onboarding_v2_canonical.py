@@ -1424,6 +1424,10 @@ def _extract_explicit_selected_envelopes(answers: dict[str, Any]) -> list[dict[s
                 "final_rollover_enabled": bool(item.get("final_rollover_enabled")),
                 "custom_category": _safe_string(item.get("custom_category")),
                 "custom_amount": _to_number(item.get("custom_amount")) or None,
+                "source": _safe_string(item.get("source")),
+                "lock_reason": _safe_string(item.get("lock_reason")),
+                "canonical_key": _safe_string(item.get("canonical_key")),
+                "source_id": _safe_string(item.get("source_id")),
             }
         )
     return result

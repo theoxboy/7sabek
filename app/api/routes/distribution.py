@@ -1481,8 +1481,26 @@ async def get_distribution_onboarding_status(
             continue
         envelope_ids_by_key[key].add(env_id)
         envelope_key_by_id[env_id] = key
+    excluded_scope_keys = {
+        "flexibility",
+        "housing_charges",
+        "rent",
+        "bills",
+        "debts",
+        "goals",
+        "emergency_buffer",
+        "balance_buffer",
+    }
     eligible_names_payload = [
         name.strip() for name in payload.eligible_envelope_names if name.strip()
+    ]
+    eligible_keys_payload = [
+        distribution_name_equivalent_key(key.strip())
+        for key in payload.eligible_envelope_keys
+        if isinstance(key, str) and key.strip()
+    ]
+    eligible_keys_payload = [
+        key for key in eligible_keys_payload if key and key not in excluded_scope_keys
     ]
     valid_envelope_ids = set(envelope_name_by_id.keys())
     eligible_ids_payload: list[UUID] = [
@@ -1490,7 +1508,7 @@ async def get_distribution_onboarding_status(
         for envelope_id in payload.eligible_envelope_ids
         if envelope_id in valid_envelope_ids
     ]
-    explicit_scope_present = bool(eligible_names_payload or eligible_ids_payload)
+    explicit_scope_present = bool(eligible_names_payload or eligible_ids_payload or eligible_keys_payload)
     canonical_eligible_names: List[str] = []
     if not explicit_scope_present:
         latest_record_result = await db.execute(
@@ -1570,7 +1588,7 @@ async def get_distribution_onboarding_status(
         for env_id in fixed_mode_ids
         if env_id in envelope_key_by_id
     }
-    non_target_keys = {"flexibility"}
+    non_target_keys = excluded_scope_keys
 
     resolved_scoped_ids: Set[UUID] = set()
     if eligible_ids_payload:
@@ -1580,6 +1598,10 @@ async def get_distribution_onboarding_status(
             if envelope_key_by_id.get(env_id) not in non_target_keys
             and envelope_key_by_id.get(env_id) not in fixed_mode_keys
         )
+    for key in eligible_keys_payload:
+        matching_ids = envelope_ids_by_key.get(key, set())
+        if matching_ids:
+            resolved_scoped_ids.update(matching_ids)
 
     unresolved_envelope_names: List[str] = []
     ignored_non_target_names: List[str] = []
@@ -1638,9 +1660,6 @@ async def get_distribution_onboarding_status(
     elif unresolved_total > 0:
         setup_status = "invalidated"
         message = "بعض الأظرفة المرنة مازال ما تزامنوش، عاود حفظ إعداد التوزيع."
-    elif scope_mismatch:
-        setup_status = "invalidated"
-        message = "تغيرت الأظرفة المستهدفة، خاصك تراجع إعداد التوزيع."
     elif covered_total == eligible_total:
         setup_status = "legacy_rules_detected" if source == "legacy_rules" else "saved_valid"
         message = (
@@ -1648,6 +1667,8 @@ async def get_distribution_onboarding_status(
             if source == "legacy_rules"
             else "إعداد التوزيع محفوظ وجاهز."
         )
+        if scope_mismatch:
+            message = "التغطية الحالية كاملة، لكن نطاق الحفظ تبدل. يفضل إعادة الحفظ."
     elif source == "none":
         setup_status = "not_started"
         message = "مازال ما تسجل حتى إعداد توزيع صالح."
@@ -1678,6 +1699,8 @@ async def get_distribution_onboarding_status(
         scoped_target_keys=sorted(eligible_keys),
         scoped_target_names=scoped_target_names,
         ignored_non_target_names=ignored_non_target_names,
+        missing_current_target_names=missing_envelope_names,
+        unresolved_current_target_names=unresolved_envelope_names,
         message=message,
     )
 

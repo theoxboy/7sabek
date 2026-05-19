@@ -20,6 +20,62 @@ from app.services.onboarding_v2_canonical import (
 )
 
 logger = logging.getLogger(__name__)
+EXCLUDED_MORONA_SCOPE_KEYS = {
+    "flexibility",
+    "housing_charges",
+    "rent",
+    "bills",
+    "debts",
+    "goals",
+}
+
+
+def _safe_dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _safe_string(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _is_excluded_morona_scope_key(key: str) -> bool:
+    return key in EXCLUDED_MORONA_SCOPE_KEYS or key.endswith("_buffer")
+
+
+def _extract_explicit_morona_scope_names(answers: dict[str, Any]) -> list[str]:
+    scoped = _safe_dict_list(answers.get("E11b_distribution_scope_v1"))
+    names: list[str] = []
+    for item in scoped:
+        is_target = bool(item.get("is_target"))
+        if not is_target:
+            continue
+        key = distribution_name_equivalent_key(_safe_string(item.get("canonical_key")))
+        if key and _is_excluded_morona_scope_key(key):
+            continue
+        display_name = _safe_string(item.get("display_label"))
+        final_name = _safe_string(item.get("final_name"))
+        name = display_name or final_name or _safe_string(item.get("name"))
+        if not name:
+            continue
+        names.append(name)
+    return names
+
+
+def get_current_morona_scope_names(
+    *,
+    answers: dict[str, Any],
+    canonical_state: CanonicalApplyState,
+) -> list[str]:
+    explicit_names = _extract_explicit_morona_scope_names(answers)
+    if explicit_names:
+        return explicit_names
+    return [
+        name
+        for name in canonical_state.distribution_eligible_names
+        if not _is_excluded_morona_scope_key(distribution_name_equivalent_key(name))
+    ]
 
 def extract_distribution_eligible_names(
     *,
@@ -92,11 +148,15 @@ async def validate_apply_preconditions(
     db: AsyncSession,
     *,
     current_user: User,
+    answers: dict[str, Any],
     canonical_state: CanonicalApplyState,
 ) -> ValidationResult:
     eligible_names = [
         name.strip()
-        for name in canonical_state.distribution_eligible_names
+        for name in get_current_morona_scope_names(
+            answers=answers,
+            canonical_state=canonical_state,
+        )
         if isinstance(name, str) and name.strip()
     ]
     scope_hash = _compute_distribution_scope_hash(eligible_names)

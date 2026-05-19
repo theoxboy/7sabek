@@ -383,6 +383,7 @@ async def apply_onboarding_v2_payload(
     validation_result = await validate_apply_preconditions(
         db,
         current_user=user,
+        answers=answers,
         canonical_state=canonical_state,
     )
     if not validation_result.is_valid:

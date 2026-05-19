@@ -139,6 +139,7 @@ class DistributionRevertBaselineIn(BaseModel):
 class DistributionOnboardingStatusIn(BaseModel):
     eligible_envelope_names: List[str] = Field(default_factory=list)
     eligible_envelope_ids: List[UUID] = Field(default_factory=list)
+    eligible_envelope_keys: List[str] = Field(default_factory=list)
     scope_hash: Optional[str] = Field(default=None, max_length=120)
 
 
@@ -163,4 +164,6 @@ class DistributionOnboardingStatusOut(BaseModel):
     scoped_target_keys: List[str] = Field(default_factory=list)
     scoped_target_names: List[str] = Field(default_factory=list)
     ignored_non_target_names: List[str] = Field(default_factory=list)
+    missing_current_target_names: List[str] = Field(default_factory=list)
+    unresolved_current_target_names: List[str] = Field(default_factory=list)
     message: str = ""
