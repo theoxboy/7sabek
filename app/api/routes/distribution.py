@@ -1509,7 +1509,7 @@ async def get_distribution_onboarding_status(
                 for name in canonical_state.distribution_eligible_names
                 if isinstance(name, str) and name.strip()
             ]
-    eligible_names = canonical_eligible_names or eligible_names_payload
+    eligible_names = eligible_names_payload or canonical_eligible_names
     unresolved_envelope_names = [
         name
         for name in eligible_names
@@ -1527,14 +1527,8 @@ async def get_distribution_onboarding_status(
         for envelope_id in payload.eligible_envelope_ids
         if envelope_id in valid_envelope_ids and envelope_id in envelope_key_by_id
     }
-    # When canonical eligible names are available from the latest onboarding
-    # record, they are the source of truth and must not be overridden by
-    # client-provided ids (which can be stale).
     eligible_keys: Set[str]
-    if canonical_eligible_names:
-        eligible_keys = eligible_keys_from_names
-    else:
-        eligible_keys = eligible_keys_from_payload or eligible_keys_from_names
+    eligible_keys = eligible_keys_from_payload or eligible_keys_from_names
     eligible_total = len(eligible_keys)
     unresolved_total = len(unresolved_envelope_names)
 
@@ -1596,8 +1590,6 @@ async def get_distribution_onboarding_status(
         seen_missing_keys.add(key)
 
     scope_mismatch = (
-        not canonical_eligible_names
-        and
         active_config is not None
         and payload.scope_hash
         and active_config.scope_hash
