@@ -1484,53 +1484,40 @@ async def get_distribution_onboarding_status(
     eligible_names_payload = [
         name.strip() for name in payload.eligible_envelope_names if name.strip()
     ]
-    canonical_eligible_names: List[str] = []
-    latest_record_result = await db.execute(
-        select(OnboardingV2Record)
-        .where(OnboardingV2Record.user_id == current_user.id)
-        .order_by(OnboardingV2Record.created_at.desc())
-        .limit(1)
-    )
-    latest_record = latest_record_result.scalar_one_or_none()
-    if latest_record is not None and isinstance(latest_record.payload, dict):
-        normalized_payload, _ = normalize_record_payload_for_response(
-            latest_record.payload,
-            stored_workflow_stage=latest_record.stage,
-        )
-        answers = (
-            normalized_payload.get("answers")
-            if isinstance(normalized_payload.get("answers"), dict)
-            else {}
-        )
-        if answers:
-            canonical_state = compute_canonical_apply_state_backend(answers)
-            canonical_eligible_names = [
-                name.strip()
-                for name in canonical_state.distribution_eligible_names
-                if isinstance(name, str) and name.strip()
-            ]
-    eligible_names = eligible_names_payload or canonical_eligible_names
-    unresolved_envelope_names = [
-        name
-        for name in eligible_names
-        if distribution_name_equivalent_key(name) not in envelope_ids_by_key
-    ]
-
-    eligible_keys_from_names: Set[str] = {
-        distribution_name_equivalent_key(name)
-        for name in eligible_names
-        if distribution_name_equivalent_key(name) in envelope_ids_by_key
-    }
     valid_envelope_ids = set(envelope_name_by_id.keys())
-    eligible_keys_from_payload: Set[str] = {
-        envelope_key_by_id[envelope_id]
+    eligible_ids_payload: list[UUID] = [
+        envelope_id
         for envelope_id in payload.eligible_envelope_ids
-        if envelope_id in valid_envelope_ids and envelope_id in envelope_key_by_id
-    }
-    eligible_keys: Set[str]
-    eligible_keys = eligible_keys_from_payload or eligible_keys_from_names
-    eligible_total = len(eligible_keys)
-    unresolved_total = len(unresolved_envelope_names)
+        if envelope_id in valid_envelope_ids
+    ]
+    explicit_scope_present = bool(eligible_names_payload or eligible_ids_payload)
+    canonical_eligible_names: List[str] = []
+    if not explicit_scope_present:
+        latest_record_result = await db.execute(
+            select(OnboardingV2Record)
+            .where(OnboardingV2Record.user_id == current_user.id)
+            .order_by(OnboardingV2Record.created_at.desc())
+            .limit(1)
+        )
+        latest_record = latest_record_result.scalar_one_or_none()
+        if latest_record is not None and isinstance(latest_record.payload, dict):
+            normalized_payload, _ = normalize_record_payload_for_response(
+                latest_record.payload,
+                stored_workflow_stage=latest_record.stage,
+            )
+            answers = (
+                normalized_payload.get("answers")
+                if isinstance(normalized_payload.get("answers"), dict)
+                else {}
+            )
+            if answers:
+                canonical_state = compute_canonical_apply_state_backend(answers)
+                canonical_eligible_names = [
+                    name.strip()
+                    for name in canonical_state.distribution_eligible_names
+                    if isinstance(name, str) and name.strip()
+                ]
+    eligible_names = eligible_names_payload or canonical_eligible_names
 
     active_result = await db.execute(
         select(DistributionSavedConfig).where(
@@ -1541,6 +1528,7 @@ async def get_distribution_onboarding_status(
     active_config = active_result.scalar_one_or_none()
 
     covered_ids: Set[UUID] = set()
+    fixed_mode_ids: Set[UUID] = set()
     source: str = "none"
     if active_config is not None and isinstance(active_config.rows, list):
         source = "active_config"
@@ -1554,9 +1542,12 @@ async def get_distribution_onboarding_status(
             if target_type != "envelope" or not enabled or mode not in {"fixed", "percent"}:
                 continue
             try:
-                covered_ids.add(UUID(str(target_id_raw)))
+                target_id = UUID(str(target_id_raw))
             except Exception:
                 continue
+            covered_ids.add(target_id)
+            if mode == "fixed":
+                fixed_mode_ids.add(target_id)
     else:
         rules_result = await db.execute(
             select(DistributionRule).where(DistributionRule.user_id == current_user.id)
@@ -1569,8 +1560,54 @@ async def get_distribution_onboarding_status(
                 and rule.mode in {"fixed_per_period", "percent_of_income"}
             ):
                 covered_ids.add(rule.target_id)
+                if rule.mode == "fixed_per_period":
+                    fixed_mode_ids.add(rule.target_id)
         if covered_ids:
             source = "legacy_rules"
+
+    fixed_mode_keys: Set[str] = {
+        envelope_key_by_id[env_id]
+        for env_id in fixed_mode_ids
+        if env_id in envelope_key_by_id
+    }
+    non_target_keys = {"flexibility"}
+
+    resolved_scoped_ids: Set[UUID] = set()
+    if eligible_ids_payload:
+        resolved_scoped_ids.update(
+            env_id
+            for env_id in eligible_ids_payload
+            if envelope_key_by_id.get(env_id) not in non_target_keys
+            and envelope_key_by_id.get(env_id) not in fixed_mode_keys
+        )
+
+    unresolved_envelope_names: List[str] = []
+    ignored_non_target_names: List[str] = []
+    for name in eligible_names:
+        key = distribution_name_equivalent_key(name)
+        if not key:
+            continue
+        if key in non_target_keys or key in fixed_mode_keys:
+            ignored_non_target_names.append(name)
+            continue
+        matching_ids = envelope_ids_by_key.get(key, set())
+        if not matching_ids:
+            unresolved_envelope_names.append(name)
+            continue
+        resolved_scoped_ids.update(matching_ids)
+
+    eligible_keys: Set[str] = {
+        envelope_key_by_id[env_id]
+        for env_id in resolved_scoped_ids
+        if env_id in envelope_key_by_id
+    }
+    scoped_target_names = [
+        envelope_name_by_id[env_id]
+        for env_id in resolved_scoped_ids
+        if env_id in envelope_name_by_id
+    ]
+    eligible_total = len(eligible_keys)
+    unresolved_total = len(unresolved_envelope_names)
 
     covered_keys = {
         envelope_key_by_id[env_id]
@@ -1630,13 +1667,17 @@ async def get_distribution_onboarding_status(
     return DistributionOnboardingStatusOut(
         setup_status=setup_status,
         eligible_total=eligible_total,
-        eligible_envelope_names=eligible_names,
+        eligible_envelope_names=scoped_target_names,
         covered_total=covered_total,
         unresolved_total=unresolved_total,
         unresolved_envelope_names=unresolved_envelope_names,
         missing_envelope_names=missing_envelope_names,
         source=source,
         active_config=active_out,
+        scoped_target_ids=sorted(resolved_scoped_ids, key=str),
+        scoped_target_keys=sorted(eligible_keys),
+        scoped_target_names=scoped_target_names,
+        ignored_non_target_names=ignored_non_target_names,
         message=message,
     )
 

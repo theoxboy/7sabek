@@ -159,4 +159,8 @@ class DistributionOnboardingStatusOut(BaseModel):
     missing_envelope_names: List[str] = Field(default_factory=list)
     source: Literal["active_config", "legacy_rules", "none"] = "none"
     active_config: Optional[DistributionSavedConfigOut] = None
+    scoped_target_ids: List[UUID] = Field(default_factory=list)
+    scoped_target_keys: List[str] = Field(default_factory=list)
+    scoped_target_names: List[str] = Field(default_factory=list)
+    ignored_non_target_names: List[str] = Field(default_factory=list)
     message: str = ""
