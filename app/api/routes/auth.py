@@ -848,7 +848,6 @@ async def request_password_reset(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> StatusOut:
-    settings = get_settings()
     normalized_email = _normalize_email(str(payload.email))
     # Rate limit strategy:
     # - per IP + email to avoid locking all reset attempts for the same IP
@@ -926,21 +925,16 @@ async def request_password_reset(
         )
 
         reset_link = _build_password_reset_link(token)
+        await db.commit()
         try:
             await send_password_reset_email(
                 to_email=user.email,
                 reset_link=reset_link,
                 locale=(payload.locale or "fr"),
             )
-            await db.commit()
             logger.info("Password reset email delivered for user=%s", user.id)
-        except Exception as exc:  # noqa: BLE001
-            await db.rollback()
+        except Exception:  # noqa: BLE001
             logger.exception("Failed to send password reset email for user=%s", user.id)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Password reset email delivery failed: {exc}",
-            ) from exc
         return StatusOut(
             status="ok",
             message="Password reset email sent.",
