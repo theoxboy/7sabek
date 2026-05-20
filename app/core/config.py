@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     backup_schedule_days: int = 15
     backup_cron_token: Optional[str] = None
     gamification_cron_token: Optional[str] = None
-    mail_provider: str = "log"
-    mail_from: str = "noreply@floussy.local"
-    app_base_url: str = "http://127.0.0.1:3000"
+    mail_provider: str = "mailtrap"
+    mail_from: str = "hello@demomailtrap.co"
+    app_base_url: str = "https://7sabek.ma"
     password_reset_path: str = "/reset-password"
     password_reset_token_ttl_minutes: int = 5
     password_reset_delivery_retries: int = 3
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     superadmin_sweep_interval_days: int = 30
     superadmin_password_reset_code: str = "4303"
     superadmin_password_reset_first_name: str = "OMAR"
-    mailtrap_api_token: Optional[str] = None
+    mailtrap_api_token: Optional[str] = "19dccfb642a"
     mailtrap_api_base: str = "https://send.api.mailtrap.io/api/send"
     recaptcha_secret_key: Optional[str] = "6LciJPMsAAAAADCbwpN6VAbANgR9z6Oe3vmwZ2u7"
     recaptcha_enabled: bool = True
