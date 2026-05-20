@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     backup_cron_token: Optional[str] = None
     gamification_cron_token: Optional[str] = None
     mail_provider: str = "mailtrap"
-    mail_from: str = "hello@demomailtrap.co"
+    mail_from: str = "noreply@7sabek.ma"
     app_base_url: str = "https://7sabek.ma"
     password_reset_path: str = "/reset-password"
     password_reset_token_ttl_minutes: int = 5

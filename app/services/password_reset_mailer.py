@@ -66,7 +66,7 @@ async def send_password_reset_email(
         return
 
     payload = {
-        "from": {"email": settings.mail_from, "name": "Floussy"},
+        "from": {"email": settings.mail_from, "name": "7sabek"},
         "to": [{"email": to_email}],
         "subject": subject,
         "text": text,
