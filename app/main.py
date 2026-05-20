@@ -38,7 +38,8 @@ def create_app() -> FastAPI:
         r"192\.168(?:\.\d{1,3}){2}|"
         r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|"
         r"[A-Za-z0-9-]+\.local|"
-        r"floussy\.online|www\.floussy\.online|api\.floussy\.online"
+        r"floussy\.online|www\.floussy\.online|api\.floussy\.online|"
+        r"7sabek\.ma|www\.7sabek\.ma|api\.7sabek\.ma"
         r")(:\d+)?$"
     )
 
