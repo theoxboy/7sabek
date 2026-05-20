@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     superadmin_password_reset_first_name: str = "OMAR"
     mailtrap_api_token: Optional[str] = None
     mailtrap_api_base: str = "https://send.api.mailtrap.io/api/send"
+    recaptcha_secret_key: Optional[str] = None
+    recaptcha_enabled: bool = False
+    recaptcha_min_score: float = 0.5
 
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="", case_sensitive=False

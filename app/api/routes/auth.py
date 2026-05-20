@@ -69,6 +69,7 @@ from app.services.onboarding_v2_record_state import (
 from app.services.profile_photo import normalize_profile_photo_url
 from app.services.sweeps import run_due_sweeps
 from app.services.gamification import to_local_date
+from app.services.recaptcha import verify_recaptcha_token
 from app.schemas.auth import (
     AuthOut,
     ForcePasswordResetIn,
@@ -402,6 +403,31 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ) -> AuthOut:
     normalized_email = _normalize_email(str(payload.email))
+    settings = get_settings()
+    is_local_env = settings.environment.strip().lower() in {"local", "development", "dev", "test"}
+    recaptcha_token = (payload.recaptcha_token or "").strip()
+    if settings.recaptcha_enabled:
+        if not recaptcha_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "RECAPTCHA_REQUIRED", "message": "أكد أنك ماشي روبوت باش نكملو التسجيل."},
+            )
+        is_valid_captcha = await verify_recaptcha_token(
+            recaptcha_token,
+            remote_ip=get_client_ip(request),
+            expected_action="register",
+            min_score=settings.recaptcha_min_score,
+        )
+        if not is_valid_captcha:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "RECAPTCHA_FAILED", "message": "ما قدرناش نتحققو من الحماية. عاود المحاولة."},
+            )
+    elif not is_local_env:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "RECAPTCHA_FAILED", "message": "ما قدرناش نتحققو من الحماية. عاود المحاولة."},
+        )
     platform_settings = await get_platform_settings(db)
     await enforce_rate_limit(
         db,

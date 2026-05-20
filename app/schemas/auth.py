@@ -23,6 +23,7 @@ class RegisterIn(BaseModel):
     defer_onboarding_v2: bool = False
     onboarding_v2_answers: Optional[dict[str, Any]] = None
     onboarding_v2_draft_objects: Optional[dict[str, Any]] = None
+    recaptcha_token: Optional[str] = Field(default=None, min_length=1, max_length=4096)
 
 
 class LoginIn(BaseModel):
