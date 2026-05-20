@@ -184,10 +184,12 @@ def _set_auth_cookies(response: Response, user_id: str) -> None:
     access_token = create_token(
         subject=user_id,
         expires_delta=timedelta(minutes=settings.access_token_exp_minutes),
+        token_type="access",
     )
     refresh_token = create_token(
         subject=user_id,
         expires_delta=timedelta(days=settings.refresh_token_exp_days),
+        token_type="refresh",
     )
     response.set_cookie(
         "access_token",
@@ -757,7 +759,7 @@ async def refresh(
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Missing refresh token")
     try:
-        user_id = decode_token(refresh_token)
+        user_id = decode_token(refresh_token, expected_type="refresh")
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Invalid refresh token") from exc
     result = await db.execute(select(User).where(User.id == user_id))
@@ -1221,6 +1223,13 @@ async def web_login_exchange(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    await enforce_rate_limit(
+        db,
+        request,
+        "web-login-exchange",
+        limit=10,
+        window_seconds=60,
+    )
     result = await db.execute(
         select(WebLoginToken).where(WebLoginToken.token == payload.token)
     )

@@ -43,9 +43,15 @@ def create_app() -> FastAPI:
         r")(:\d+)?$"
     )
 
+    is_prod_env = environment in {"production", "prod"}
     configure_logging()
     logger = logging.getLogger("app.cors")
-    app = FastAPI(title=settings.app_name)
+    app = FastAPI(
+        title=settings.app_name,
+        docs_url=None if is_prod_env else "/docs",
+        redoc_url=None if is_prod_env else "/redoc",
+        openapi_url=None if is_prod_env else "/openapi.json",
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -80,13 +86,11 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         if request.url.path.startswith("/auth"):
             origin = request.headers.get("origin")
-            cookie = request.headers.get("cookie")
             logger.info(
-                "CORS debug %s %s origin=%s cookie=%s",
+                "CORS debug %s %s origin=%s cookie=[PRESENT]",
                 request.method,
                 request.url.path,
                 origin,
-                cookie,
             )
             logger.info(
                 "CORS response %s allow-credentials=%s allow-origin=%s",
@@ -185,6 +189,20 @@ def create_app() -> FastAPI:
             logger.exception("Unhandled error on %s %s", request.method, request.url.path)
             response = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
         return _append_cors_headers(response, origin, allow_origin_regex)
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)")
+        if not is_local_env:
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+        return response
 
     app.include_router(api_router)
 
