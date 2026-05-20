@@ -186,6 +186,20 @@ def create_app() -> FastAPI:
             response = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
         return _append_cors_headers(response, origin, allow_origin_regex)
 
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)")
+        if not is_local_env:
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+        return response
+
     app.include_router(api_router)
 
     return app

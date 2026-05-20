@@ -9,11 +9,11 @@ class Settings(BaseSettings):
     environment: str = "local"
     log_level: str = "INFO"
     database_url: str
-    jwt_secret: str = "change-me"
+    jwt_secret: str
     jwt_algorithm: str = "HS256"
     access_token_exp_minutes: int = 30
     refresh_token_exp_days: int = 14
-    cookie_secure: bool = False
+    cookie_secure: bool = True
     backup_storage_dir: str = "/opt/backups/floussy"
     backup_retention_count: int = 1
     backup_schedule_days: int = 15
@@ -29,11 +29,11 @@ class Settings(BaseSettings):
     superadmin_password: Optional[str] = None
     superadmin_currency: str = "MAD"
     superadmin_sweep_interval_days: int = 30
-    superadmin_password_reset_code: str = "4303"
-    superadmin_password_reset_first_name: str = "OMAR"
-    mailtrap_api_token: Optional[str] = "98a9b2ffdd050907607028dd4553e5ec"
+    superadmin_password_reset_code: str = ""
+    superadmin_password_reset_first_name: str = ""
+    mailtrap_api_token: Optional[str] = None
     mailtrap_api_base: str = "https://send.api.mailtrap.io/api/send"
-    recaptcha_secret_key: Optional[str] = "6LciJPMsAAAAADCbwpN6VAbANgR9z6Oe3vmwZ2u7"
+    recaptcha_secret_key: Optional[str] = None
     recaptcha_enabled: bool = True
     recaptcha_min_score: float = 0.5
 
