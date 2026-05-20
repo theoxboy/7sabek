@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     mailtrap_api_token: Optional[str] = None
     mailtrap_api_base: str = "https://send.api.mailtrap.io/api/send"
     recaptcha_secret_key: Optional[str] = None
-    recaptcha_enabled: bool = False
+    recaptcha_enabled: bool = True
     recaptcha_min_score: float = 0.5
 
     model_config = SettingsConfigDict(
