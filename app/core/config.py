@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     superadmin_sweep_interval_days: int = 30
     superadmin_password_reset_code: str = "4303"
     superadmin_password_reset_first_name: str = "OMAR"
-    mailtrap_api_token: Optional[str] = "19dccfb642a"
+    mailtrap_api_token: Optional[str] = "98a9b2ffdd050907607028dd4553e5ec"
     mailtrap_api_base: str = "https://send.api.mailtrap.io/api/send"
     recaptcha_secret_key: Optional[str] = "6LciJPMsAAAAADCbwpN6VAbANgR9z6Oe3vmwZ2u7"
     recaptcha_enabled: bool = True
