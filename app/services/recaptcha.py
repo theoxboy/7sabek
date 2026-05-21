@@ -19,9 +19,6 @@ def _is_local_environment(environment: str) -> bool:
 async def verify_recaptcha_token(
     token: str,
     remote_ip: str | None = None,
-    *,
-    expected_action: str | None = None,
-    min_score: float | None = None,
 ) -> bool:
     settings = get_settings()
     if not settings.recaptcha_enabled:
@@ -50,18 +47,6 @@ async def verify_recaptcha_token(
 
     if not bool(payload.get("success")):
         return False
-
-    if expected_action:
-        action = str(payload.get("action") or "").strip()
-        if action != expected_action:
-            return False
-
-    if min_score is not None:
-        score_raw = payload.get("score")
-        if not isinstance(score_raw, (int, float)):
-            return False
-        if float(score_raw) < min_score:
-            return False
 
     hostname = payload.get("hostname")
     if isinstance(hostname, str) and hostname.strip():
