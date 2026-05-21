@@ -417,8 +417,6 @@ async def register(
         is_valid_captcha = await verify_recaptcha_token(
             recaptcha_token,
             remote_ip=get_client_ip(request),
-            expected_action="register",
-            min_score=settings.recaptcha_min_score,
         )
         if not is_valid_captcha:
             raise HTTPException(
