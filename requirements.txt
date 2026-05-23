@@ -14,3 +14,4 @@ bcrypt<4
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.9
 Pillow>=10.0
+webauthn>=2.7.1
