@@ -54,7 +54,7 @@ async def get_valid_challenge(
     raw_challenge: str,
     user_id: Optional[UUID] = None,
     challenge_id: Optional[UUID] = None,
-) -> WebAuthnChallenge | None:
+) -> Optional[WebAuthnChallenge]:
     now = datetime.now(timezone.utc)
     stmt = (
         select(WebAuthnChallenge)

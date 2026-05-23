@@ -61,7 +61,7 @@ def get_passkeys_allowed_emails(raw_value: str) -> set[str]:
     }
 
 
-def is_passkeys_enabled_for_email(email: str | None) -> bool:
+def is_passkeys_enabled_for_email(email: Optional[str]) -> bool:
     settings = get_settings()
     if not settings.enable_passkeys:
         return False

@@ -4,7 +4,7 @@ import base64
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -70,7 +70,7 @@ def _ensure_enabled() -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 
-def _is_user_allowed_for_passkeys(user: User | None) -> bool:
+def _is_user_allowed_for_passkeys(user: Optional[User]) -> bool:
     return is_passkeys_enabled_for_email(user.email if user is not None else None)
 
 
