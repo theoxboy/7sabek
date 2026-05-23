@@ -927,12 +927,18 @@ async def request_password_reset(
         reset_link = _build_password_reset_link(token)
         await db.commit()
         try:
-            await send_password_reset_email(
+            delivered = await send_password_reset_email(
                 to_email=user.email,
                 reset_link=reset_link,
                 locale=(payload.locale or "fr"),
             )
-            logger.info("Password reset email delivered for user=%s", user.id)
+            if delivered:
+                logger.info("Password reset email delivered for user=%s", user.id)
+            else:
+                logger.warning(
+                    "Password reset email not delivered (simulated/fallback) for user=%s",
+                    user.id,
+                )
         except Exception:  # noqa: BLE001
             logger.exception("Failed to send password reset email for user=%s", user.id)
         return StatusOut(
