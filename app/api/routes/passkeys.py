@@ -86,6 +86,28 @@ def _safe_credential_mask(value: str) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+def _safe_email_mask(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    if "@" not in raw:
+        return "***"
+    local, _, domain = raw.partition("@")
+    local = local.strip()
+    domain = domain.strip()
+    if not local or not domain:
+        return "***"
+    if len(local) <= 2:
+        return f"{local[0]}***@{domain}" if len(local) == 2 else f"***@{domain}"
+    return f"{local[:2]}***@{domain}"
+
+
+def _safe_user_label(user: Optional[User]) -> str:
+    if user is None:
+        return "unknown"
+    user_id = str(getattr(user, "id", "") or "")
+    user_id_short = user_id[:8] if user_id else "unknown"
+    return f"id={user_id_short} email={_safe_email_mask(getattr(user, 'email', None))}"
+
+
 def _parse_options(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         return json.loads(value)
@@ -124,47 +146,73 @@ async def passkey_register_options(
     _ensure_enabled()
     _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-register-options", limit=15, window_seconds=60)
-    rows = await db.execute(
-        select(UserPasskey.credential_id).where(
-            UserPasskey.user_id == user.id,
-            UserPasskey.revoked_at.is_(None),
+    user_label = _safe_user_label(user)
+    logger.info("passkey_register_options_start user=%s", user_label)
+    try:
+        rows = await db.execute(
+            select(UserPasskey.credential_id).where(
+                UserPasskey.user_id == user.id,
+                UserPasskey.revoked_at.is_(None),
+            )
         )
-    )
-    exclude = [
-        PublicKeyCredentialDescriptor(id=base64url_to_bytes(row[0]))
-        for row in rows.all()
-    ]
-    options = generate_registration_options(
-        rp_id=get_settings().passkey_rp_id,
-        rp_name=get_settings().passkey_rp_name,
-        user_id=str(user.id).encode("utf-8"),
-        user_name=user.email,
-        user_display_name=user.email,
-        exclude_credentials=exclude,
-        authenticator_selection=AuthenticatorSelectionCriteria(
-            user_verification=UserVerificationRequirement.REQUIRED,
-        ),
-    )
-    options_json = _parse_options(options_to_json(options))
-    challenge = str(options_json.get("challenge") or "").strip()
-    if not challenge:
-        raise HTTPException(status_code=500, detail="Unable to generate challenge")
-    challenge_record = await create_challenge(
-        db,
-        flow="register",
-        user_id=user.id,
-        raw_challenge=challenge,
-        request=request,
-    )
-    logger.info(
-        "passkey_register_options user_id=%s challenge_id=%s",
-        user.id,
-        challenge_record.id,
-    )
-    return PasskeyRegisterOptionsOut(
-        challenge_id=str(challenge_record.id),
-        options=options_json,
-    )
+        existing_rows = rows.all()
+        logger.info(
+            "passkey_register_options_existing_credentials user=%s count=%s",
+            user_label,
+            len(existing_rows),
+        )
+        exclude = [
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(row[0]))
+            for row in existing_rows
+        ]
+        options = generate_registration_options(
+            rp_id=get_settings().passkey_rp_id,
+            rp_name=get_settings().passkey_rp_name,
+            user_id=str(user.id).encode("utf-8"),
+            user_name=user.email,
+            user_display_name=user.email,
+            exclude_credentials=exclude,
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                user_verification=UserVerificationRequirement.REQUIRED,
+            ),
+        )
+        options_json = _parse_options(options_to_json(options))
+        challenge = str(options_json.get("challenge") or "").strip()
+        if not challenge:
+            raise HTTPException(status_code=500, detail="Unable to generate challenge")
+        logger.info("passkey_register_options_generated user=%s", user_label)
+        challenge_record = await create_challenge(
+            db,
+            flow="register",
+            user_id=user.id,
+            raw_challenge=challenge,
+            request=request,
+        )
+        logger.info(
+            "passkey_register_options_challenge_saved user=%s challenge_id=%s",
+            user_label,
+            challenge_record.id,
+        )
+        return PasskeyRegisterOptionsOut(
+            challenge_id=str(challenge_record.id),
+            options=options_json,
+        )
+    except HTTPException as exc:
+        logger.warning(
+            "passkey_register_options_error user=%s type=%s message=%s",
+            user_label,
+            exc.__class__.__name__,
+            str(exc.detail),
+        )
+        raise
+    except Exception as exc:
+        logger.exception(
+            "passkey_register_options_error user=%s type=%s message=%s",
+            user_label,
+            exc.__class__.__name__,
+            str(exc),
+        )
+        raise
 
 
 @router.post("/register/verify", response_model=PasskeyRegisterVerifyOut)
@@ -434,26 +482,51 @@ async def list_passkeys(
     _ensure_enabled()
     _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-list", limit=30, window_seconds=60)
-    rows = await db.execute(
-        select(UserPasskey)
-        .where(
-            UserPasskey.user_id == user.id,
-            UserPasskey.revoked_at.is_(None),
+    user_label = _safe_user_label(user)
+    logger.info("passkeys_list_start user=%s", user_label)
+    try:
+        rows = await db.execute(
+            select(UserPasskey)
+            .where(
+                UserPasskey.user_id == user.id,
+                UserPasskey.revoked_at.is_(None),
+            )
+            .order_by(UserPasskey.created_at.desc())
         )
-        .order_by(UserPasskey.created_at.desc())
-    )
-    return [
-        PasskeyOut(
-            id=row.id,
-            name=row.name,
-            credential_id_masked=_safe_credential_mask(row.credential_id),
-            aaguid=row.aaguid,
-            transports=row.transports,
-            created_at=row.created_at,
-            last_used_at=row.last_used_at,
+        passkeys = rows.scalars().all()
+        logger.info(
+            "passkeys_list_query_success user=%s count=%s",
+            user_label,
+            len(passkeys),
         )
-        for row in rows.scalars().all()
-    ]
+        return [
+            PasskeyOut(
+                id=row.id,
+                name=row.name,
+                credential_id_masked=_safe_credential_mask(row.credential_id),
+                aaguid=row.aaguid,
+                transports=row.transports,
+                created_at=row.created_at,
+                last_used_at=row.last_used_at,
+            )
+            for row in passkeys
+        ]
+    except HTTPException as exc:
+        logger.warning(
+            "passkeys_list_error user=%s type=%s message=%s",
+            user_label,
+            exc.__class__.__name__,
+            str(exc.detail),
+        )
+        raise
+    except Exception as exc:
+        logger.exception(
+            "passkeys_list_error user=%s type=%s message=%s",
+            user_label,
+            exc.__class__.__name__,
+            str(exc),
+        )
+        raise
 
 
 @router.delete("/{passkey_id}", response_model=PasskeyDeleteOut)
