@@ -145,3 +145,4 @@ class PlatformStatusOut(BaseModel):
     announcement_countries: list[str]
     announcements: list[AnnouncementPublicOut] = Field(default_factory=list)
     account_deletion_grace_days: int
+    features: dict[str, bool] = Field(default_factory=dict)

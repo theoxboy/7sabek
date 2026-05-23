@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.platform_settings import get_platform_settings, get_public_announcements
 from app.db.session import get_db
 from app.schemas.platform_settings import PlatformStatusOut
@@ -83,4 +84,5 @@ async def get_platform_status(
         ),
         announcements=announcements,
         account_deletion_grace_days=settings.account_deletion_grace_days,
+        features={"passkeys": bool(get_settings().enable_passkeys)},
     )
