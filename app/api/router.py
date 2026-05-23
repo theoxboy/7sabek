@@ -11,6 +11,7 @@ from app.api.routes.gamification import router as gamification_router
 from app.api.routes.leaderboard import router as leaderboard_router
 from app.api.routes.mappings import router as mappings_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.passkeys import router as passkeys_router
 from app.api.routes.analytics import router as analytics_router
 from app.api.routes.admin_activity import router as admin_activity_router
 from app.api.routes.admin_backups import router as admin_backups_router
@@ -27,6 +28,7 @@ api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(public_router, tags=["public"])
 api_router.include_router(auth_router, tags=["auth"])
+api_router.include_router(passkeys_router, tags=["passkeys"])
 api_router.include_router(analytics_router, tags=["analytics"])
 api_router.include_router(admin_activity_router, tags=["admin-activity"])
 api_router.include_router(admin_backups_router, tags=["admin-backups"])

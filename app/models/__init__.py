@@ -30,9 +30,11 @@ from app.models.sweep import Sweep
 from app.models.superadmin_session import SuperadminSession
 from app.models.transaction import Transaction, TransactionType
 from app.models.user import User
+from app.models.user_passkey import UserPasskey
 from app.models.user_shiftpilot_state import UserShiftPilotState
 from app.models.user_gamification import UserGamification
 from app.models.web_login_token import WebLoginToken
+from app.models.webauthn_challenge import WebAuthnChallenge
 from app.models.advisor_preview import AdvisorPreview
 from app.models.advisor_pre_apply_validation import AdvisorPreApplyValidation
 from app.models.advisor_decision import AdvisorDecision
@@ -70,9 +72,11 @@ __all__ = [
     "Transaction",
     "TransactionType",
     "User",
+    "UserPasskey",
     "UserShiftPilotState",
     "UserGamification",
     "WebLoginToken",
+    "WebAuthnChallenge",
     "AdvisorPreview",
     "AdvisorPreApplyValidation",
     "AdvisorDecision",

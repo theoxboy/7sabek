@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     mailtrap_api_base: str = "https://send.api.mailtrap.io/api/send"
     recaptcha_secret_key: Optional[str] = None
     recaptcha_enabled: bool = True
+    enable_passkeys: bool = False
+    passkey_rp_id: str = "7sabek.ma"
+    passkey_rp_origin: str = "https://7sabek.ma"
+    passkey_rp_name: str = "7sabek"
+    passkey_challenge_ttl_seconds: int = 300
 
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="", case_sensitive=False
