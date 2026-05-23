@@ -16,6 +16,9 @@ async def get_platform_status(
     db: AsyncSession = Depends(get_db),
 ) -> PlatformStatusOut:
     settings = await get_platform_settings(db, create_if_missing=False)
+    passkeys_public_enabled = bool(
+        get_settings().enable_passkeys and get_settings().passkeys_allow_all
+    )
     announcements = get_public_announcements(settings)
     announcement_active = any(bool(item.get("active")) for item in announcements)
     primary_announcement = (
@@ -84,5 +87,5 @@ async def get_platform_status(
         ),
         announcements=announcements,
         account_deletion_grace_days=settings.account_deletion_grace_days,
-        features={"passkeys": bool(get_settings().enable_passkeys)},
+        features={"passkeys": passkeys_public_enabled},
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -60,3 +60,8 @@ class PasskeyOut(BaseModel):
 class PasskeyDeleteOut(BaseModel):
     status: str
     message: Optional[str] = None
+
+
+class PasskeyStatusOut(BaseModel):
+    enabled: bool
+    reason: Literal["enabled", "disabled", "not_allowed"]

@@ -32,7 +32,7 @@ from app.api.routes.auth import (
     _set_superadmin_session_cookie,
     _restore_if_suspension_expired,
 )
-from app.core.config import get_settings
+from app.core.config import get_settings, is_passkeys_enabled_for_email
 from app.core.platform_settings import (
     build_blocked_message,
     build_maintenance_message,
@@ -53,6 +53,7 @@ from app.schemas.passkeys import (
     PasskeyRegisterOptionsOut,
     PasskeyRegisterVerifyIn,
     PasskeyRegisterVerifyOut,
+    PasskeyStatusOut,
 )
 from app.services.passkeys import (
     consume_challenge_atomic,
@@ -66,6 +67,15 @@ logger = logging.getLogger("app.auth.passkeys")
 
 def _ensure_enabled() -> None:
     if not get_settings().enable_passkeys:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+
+def _is_user_allowed_for_passkeys(user: User | None) -> bool:
+    return is_passkeys_enabled_for_email(user.email if user is not None else None)
+
+
+def _ensure_user_allowed(user: User) -> None:
+    if not _is_user_allowed_for_passkeys(user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 
@@ -93,6 +103,18 @@ def _bytes_to_base64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
+@router.get("/status", response_model=PasskeyStatusOut)
+async def passkey_status(user: User = Depends(get_current_user)) -> PasskeyStatusOut:
+    settings = get_settings()
+    if not settings.enable_passkeys:
+        return PasskeyStatusOut(enabled=False, reason="disabled")
+    if settings.passkeys_allow_all:
+        return PasskeyStatusOut(enabled=True, reason="enabled")
+    if _is_user_allowed_for_passkeys(user):
+        return PasskeyStatusOut(enabled=True, reason="enabled")
+    return PasskeyStatusOut(enabled=False, reason="not_allowed")
+
+
 @router.post("/register/options", response_model=PasskeyRegisterOptionsOut)
 async def passkey_register_options(
     request: Request,
@@ -100,6 +122,7 @@ async def passkey_register_options(
     db: AsyncSession = Depends(get_db),
 ) -> PasskeyRegisterOptionsOut:
     _ensure_enabled()
+    _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-register-options", limit=15, window_seconds=60)
     rows = await db.execute(
         select(UserPasskey.credential_id).where(
@@ -152,6 +175,7 @@ async def passkey_register_verify(
     db: AsyncSession = Depends(get_db),
 ) -> PasskeyRegisterVerifyOut:
     _ensure_enabled()
+    _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-register-verify", limit=20, window_seconds=60)
     challenge_id = None
     if payload.challenge_id:
@@ -239,7 +263,11 @@ async def passkey_login_options(
     if normalized_email:
         result = await db.execute(select(User).where(func.lower(User.email) == normalized_email))
         candidate = result.scalar_one_or_none()
-        if candidate is not None and candidate.deleted_at is None:
+        if (
+            candidate is not None
+            and candidate.deleted_at is None
+            and _is_user_allowed_for_passkeys(candidate)
+        ):
             target_user = candidate
 
     allow_credentials = []
@@ -352,9 +380,10 @@ async def passkey_login_verify(
 
     user_result = await db.execute(select(User).where(User.id == passkey.user_id))
     user = user_result.scalar_one_or_none()
-    platform_settings = await get_platform_settings(db)
-    if user is None:
+    if user is None or not _is_user_allowed_for_passkeys(user):
+        logger.warning("passkey_login_failed reason=not_allowed")
         raise HTTPException(status_code=401, detail="Passkey verification failed")
+    platform_settings = await get_platform_settings(db)
     if user.deleted_at is not None:
         raise HTTPException(status_code=403, detail=build_deleted_account_message(user, platform_settings))
     if platform_settings.maintenance_mode and user.role != "superadmin":
@@ -403,6 +432,7 @@ async def list_passkeys(
     db: AsyncSession = Depends(get_db),
 ) -> list[PasskeyOut]:
     _ensure_enabled()
+    _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-list", limit=30, window_seconds=60)
     rows = await db.execute(
         select(UserPasskey)
@@ -434,6 +464,7 @@ async def delete_passkey(
     db: AsyncSession = Depends(get_db),
 ) -> PasskeyDeleteOut:
     _ensure_enabled()
+    _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-delete", limit=20, window_seconds=60)
     result = await db.execute(
         select(UserPasskey).where(

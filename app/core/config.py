@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     recaptcha_secret_key: Optional[str] = None
     recaptcha_enabled: bool = True
     enable_passkeys: bool = False
+    passkeys_allow_all: bool = False
+    passkeys_allowed_emails: str = ""
     passkey_rp_id: str = "7sabek.ma"
     passkey_rp_origin: str = "https://7sabek.ma"
     passkey_rp_name: str = "7sabek"
@@ -49,3 +51,23 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def get_passkeys_allowed_emails(raw_value: str) -> set[str]:
+    return {
+        part.strip().lower()
+        for part in raw_value.split(",")
+        if part and part.strip()
+    }
+
+
+def is_passkeys_enabled_for_email(email: str | None) -> bool:
+    settings = get_settings()
+    if not settings.enable_passkeys:
+        return False
+    if settings.passkeys_allow_all:
+        return True
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return False
+    return normalized in get_passkeys_allowed_emails(settings.passkeys_allowed_emails)
