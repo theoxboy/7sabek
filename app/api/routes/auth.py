@@ -98,6 +98,12 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def _email_domain(value: str) -> str:
+    if "@" not in value:
+        return "unknown"
+    return value.rsplit("@", 1)[-1].lower()
+
+
 def _build_register_onboarding_record(payload: RegisterIn, user_id) -> OnboardingV2Record:
     answers = normalize_onboarding_answers(payload.onboarding_v2_answers or {})
     draft_objects = normalize_onboarding_draft_objects(
@@ -849,6 +855,19 @@ async def request_password_reset(
     db: AsyncSession = Depends(get_db),
 ) -> StatusOut:
     normalized_email = _normalize_email(str(payload.email))
+    settings = get_settings()
+    requested_domain = _email_domain(normalized_email)
+    mail_provider = (settings.mail_provider or "").strip().lower() or "log"
+    mailtrap_token_state = (
+        "SET" if (settings.mailtrap_api_token or "").strip() else "MISSING"
+    )
+    logger.info(
+        "Password reset request received email_domain=%s mail_provider=%s "
+        "mailtrap_api_token=%s diagnostics_v=2026-05-23a",
+        requested_domain,
+        mail_provider,
+        mailtrap_token_state,
+    )
     # Rate limit strategy:
     # - per IP + email to avoid locking all reset attempts for the same IP
     # - stricter than login but less frustrating during normal usage
@@ -870,6 +889,12 @@ async def request_password_reset(
         select(User).where(func.lower(User.email) == normalized_email)
     )
     user = result.scalar_one_or_none()
+    user_eligible = bool(user is not None and user.deleted_at is None and user.password_hash)
+    logger.info(
+        "Password reset lookup result email_domain=%s user_eligible=%s",
+        requested_domain,
+        user_eligible,
+    )
 
     # Do not leak account existence in production responses.
     if user is not None and user.deleted_at is None and user.password_hash:
@@ -926,6 +951,11 @@ async def request_password_reset(
 
         reset_link = _build_password_reset_link(token)
         await db.commit()
+        logger.info(
+            "Password reset mailer dispatch starting user_id=%s email_domain=%s",
+            user.id,
+            requested_domain,
+        )
         try:
             delivered = await send_password_reset_email(
                 to_email=user.email,

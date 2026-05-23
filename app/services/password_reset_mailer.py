@@ -103,7 +103,8 @@ async def send_password_reset_email(
     last_error: Exception | None = None
     api_host = urlparse(settings.mailtrap_api_base).netloc or "unknown"
     logger.info(
-        "Password reset email send start provider=mailtrap api_host=%s from_domain=%s to_domain=%s",
+        "Password reset email send start provider=mailtrap api_host=%s from_domain=%s "
+        "to_domain=%s diagnostics_v=2026-05-23a",
         api_host,
         sender_domain,
         recipient_domain,
