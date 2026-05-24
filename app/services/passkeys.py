@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
+import json
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Optional
+from typing import Any, Dict, Optional
 from uuid import UUID
 
 from fastapi import Request
@@ -16,6 +18,53 @@ from app.models import WebAuthnChallenge
 
 def challenge_hash(raw_challenge: str) -> str:
     return sha256(raw_challenge.encode("utf-8")).hexdigest()
+
+
+def _decode_client_data_json(client_data_b64url: str) -> Optional[Dict[str, Any]]:
+    value = (client_data_b64url or "").strip()
+    if not value:
+        return None
+    try:
+        padding = "=" * (-len(value) % 4)
+        raw = base64.urlsafe_b64decode(f"{value}{padding}")
+        parsed = json.loads(raw.decode("utf-8"))
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        return None
+    return None
+
+
+def get_origin_from_registration_credential(credential: Dict[str, Any]) -> Optional[str]:
+    response = credential.get("response") if isinstance(credential, dict) else None
+    if not isinstance(response, dict):
+        return None
+    client_data = response.get("clientDataJSON")
+    if not isinstance(client_data, str):
+        return None
+    parsed = _decode_client_data_json(client_data)
+    if not isinstance(parsed, dict):
+        return None
+    origin = parsed.get("origin")
+    if isinstance(origin, str) and origin.strip():
+        return origin.strip()
+    return None
+
+
+def get_origin_from_authentication_credential(credential: Dict[str, Any]) -> Optional[str]:
+    response = credential.get("response") if isinstance(credential, dict) else None
+    if not isinstance(response, dict):
+        return None
+    client_data = response.get("clientDataJSON")
+    if not isinstance(client_data, str):
+        return None
+    parsed = _decode_client_data_json(client_data)
+    if not isinstance(parsed, dict):
+        return None
+    origin = parsed.get("origin")
+    if isinstance(origin, str) and origin.strip():
+        return origin.strip()
+    return None
 
 
 def challenge_ttl() -> timedelta:
