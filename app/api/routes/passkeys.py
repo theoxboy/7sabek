@@ -225,12 +225,27 @@ async def passkey_register_verify(
     _ensure_enabled()
     _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-register-verify", limit=20, window_seconds=60)
+    user_label = _safe_user_label(user)
     challenge_id = None
     if payload.challenge_id:
         try:
             challenge_id = UUID(payload.challenge_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid challenge") from exc
+    credential_id_raw = payload.credential.get("id")
+    credential_masked = (
+        _safe_credential_mask(credential_id_raw)
+        if isinstance(credential_id_raw, str) and credential_id_raw.strip()
+        else "missing"
+    )
+    logger.info(
+        "passkey_register_verify_start user=%s challenge_id_present=%s credential=%s expected_rp_id=%s expected_origin=%s",
+        user_label,
+        bool(challenge_id),
+        credential_masked,
+        get_settings().passkey_rp_id,
+        get_settings().passkey_rp_origin,
+    )
     challenge = await get_valid_challenge(
         db,
         flow="register",
@@ -239,6 +254,12 @@ async def passkey_register_verify(
         challenge_id=challenge_id,
     )
     if challenge is None:
+        logger.warning(
+            "passkey_register_verify_failed user=%s reason=challenge_invalid challenge_id_present=%s credential=%s",
+            user_label,
+            bool(challenge_id),
+            credential_masked,
+        )
         raise HTTPException(status_code=400, detail="Invalid challenge")
 
     try:
@@ -249,9 +270,17 @@ async def passkey_register_verify(
             expected_origin=get_settings().passkey_rp_origin,
             require_user_verification=True,
         )
-    except Exception:
-        logger.warning("passkey_register_verify_failed user_id=%s", user.id)
-        raise HTTPException(status_code=401, detail="Passkey verification failed")
+    except Exception as exc:
+        logger.warning(
+            "passkey_register_verify_failed user=%s reason=crypto credential=%s type=%s message=%s expected_rp_id=%s expected_origin=%s",
+            user_label,
+            credential_masked,
+            exc.__class__.__name__,
+            str(exc),
+            get_settings().passkey_rp_id,
+            get_settings().passkey_rp_origin,
+        )
+        raise HTTPException(status_code=422, detail="Passkey verification failed")
 
     credential_id = payload.credential.get("id") or ""
     if not isinstance(credential_id, str) or not credential_id.strip():
@@ -262,10 +291,21 @@ async def passkey_register_verify(
         select(UserPasskey.id).where(UserPasskey.credential_id == credential_id)
     )
     if duplicate_result.scalar_one_or_none() is not None:
+        logger.warning(
+            "passkey_register_verify_failed user=%s reason=duplicate_credential credential=%s",
+            user_label,
+            _safe_credential_mask(credential_id),
+        )
         raise HTTPException(status_code=409, detail="Credential already registered")
 
     consumed = await consume_challenge_atomic(db, challenge_id=challenge.id)
     if not consumed:
+        logger.warning(
+            "passkey_register_verify_failed user=%s reason=challenge_reused_or_expired challenge_id_present=%s credential=%s",
+            user_label,
+            bool(challenge_id),
+            _safe_credential_mask(credential_id),
+        )
         raise HTTPException(status_code=400, detail="Invalid challenge")
 
     raw_public_key = bytes(verification.credential_public_key)
@@ -286,8 +326,8 @@ async def passkey_register_verify(
     await db.commit()
     await db.refresh(passkey)
     logger.info(
-        "passkey_register_success user_id=%s passkey_id=%s credential=%s",
-        user.id,
+        "passkey_register_success user=%s passkey_id=%s credential=%s",
+        user_label,
         passkey.id,
         _safe_credential_mask(passkey.credential_id),
     )
