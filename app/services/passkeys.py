@@ -85,6 +85,7 @@ async def create_challenge(
     record = WebAuthnChallenge(
         user_id=user_id,
         challenge_hash=challenge_hash(raw_challenge),
+        challenge_raw=raw_challenge,
         flow=flow,
         expires_at=now + challenge_ttl(),
         request_ip=get_client_ip(request),
@@ -117,6 +118,28 @@ async def get_valid_challenge(
     )
     if challenge_id is not None:
         stmt = stmt.where(WebAuthnChallenge.id == challenge_id)
+    if user_id is None:
+        stmt = stmt.where(WebAuthnChallenge.user_id.is_(None))
+    else:
+        stmt = stmt.where(WebAuthnChallenge.user_id == user_id)
+    result = await db.execute(stmt)
+    return result.scalars().first()
+
+
+async def get_valid_challenge_by_id(
+    db: AsyncSession,
+    *,
+    flow: str,
+    challenge_id: UUID,
+    user_id: Optional[UUID] = None,
+) -> Optional[WebAuthnChallenge]:
+    now = datetime.now(timezone.utc)
+    stmt = select(WebAuthnChallenge).where(
+        WebAuthnChallenge.id == challenge_id,
+        WebAuthnChallenge.flow == flow,
+        WebAuthnChallenge.used_at.is_(None),
+        WebAuthnChallenge.expires_at > now,
+    )
     if user_id is None:
         stmt = stmt.where(WebAuthnChallenge.user_id.is_(None))
     else:

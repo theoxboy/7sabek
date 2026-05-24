@@ -19,8 +19,10 @@ from webauthn import (
 )
 from webauthn.helpers import options_to_json
 from webauthn.helpers.structs import (
+    AttestationConveyancePreference,
     AuthenticatorSelectionCriteria,
     PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
     UserVerificationRequirement,
 )
 
@@ -62,8 +64,10 @@ from app.schemas.passkeys import (
 from app.services.passkeys import (
     consume_challenge_atomic,
     create_challenge,
+    challenge_hash,
     get_origin_from_authentication_credential,
     get_origin_from_registration_credential,
+    get_valid_challenge_by_id,
     get_valid_challenge,
 )
 
@@ -131,6 +135,24 @@ def _bytes_to_base64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
+def _build_registration_authenticator_selection() -> tuple[AuthenticatorSelectionCriteria, str, bool]:
+    # Safari/iCloud Keychain compatibility: keep UV required and request discoverable creds.
+    resident_key_value = "preferred"
+    require_resident_key = True
+    try:
+        selection = AuthenticatorSelectionCriteria(
+            user_verification=UserVerificationRequirement.REQUIRED,
+            resident_key=ResidentKeyRequirement.PREFERRED,
+            require_resident_key=require_resident_key,
+        )
+    except TypeError:
+        selection = AuthenticatorSelectionCriteria(
+            user_verification=UserVerificationRequirement.REQUIRED,
+            require_resident_key=require_resident_key,
+        )
+    return selection, resident_key_value, require_resident_key
+
+
 def _request_origin(request: Request) -> Optional[str]:
     origin = (request.headers.get("origin") or "").strip()
     if origin:
@@ -189,22 +211,45 @@ async def passkey_register_options(
             PublicKeyCredentialDescriptor(id=base64url_to_bytes(row[0]))
             for row in existing_rows
         ]
-        options = generate_registration_options(
-            rp_id=get_settings().passkey_rp_id,
-            rp_name=get_settings().passkey_rp_name,
-            user_id=str(user.id).encode("utf-8"),
-            user_name=user.email,
-            user_display_name=user.email,
-            exclude_credentials=exclude,
-            authenticator_selection=AuthenticatorSelectionCriteria(
-                user_verification=UserVerificationRequirement.REQUIRED,
-            ),
+        authenticator_selection, resident_key_value, require_resident_key = (
+            _build_registration_authenticator_selection()
         )
+        attestation_value = "none"
+        try:
+            options = generate_registration_options(
+                rp_id=get_settings().passkey_rp_id,
+                rp_name=get_settings().passkey_rp_name,
+                user_id=str(user.id).encode("utf-8"),
+                user_name=user.email,
+                user_display_name=user.email,
+                exclude_credentials=exclude,
+                authenticator_selection=authenticator_selection,
+                attestation=AttestationConveyancePreference.NONE,
+            )
+        except TypeError:
+            options = generate_registration_options(
+                rp_id=get_settings().passkey_rp_id,
+                rp_name=get_settings().passkey_rp_name,
+                user_id=str(user.id).encode("utf-8"),
+                user_name=user.email,
+                user_display_name=user.email,
+                exclude_credentials=exclude,
+                authenticator_selection=authenticator_selection,
+            )
+            attestation_value = "library_default"
         options_json = _parse_options(options_to_json(options))
         challenge = str(options_json.get("challenge") or "").strip()
         if not challenge:
             raise HTTPException(status_code=500, detail="Unable to generate challenge")
         logger.info("passkey_register_options_generated user=%s", user_label)
+        logger.info(
+            "passkey_register_options_profile user=%s user_verification=%s resident_key=%s require_resident_key=%s attestation=%s",
+            user_label,
+            "required",
+            resident_key_value,
+            require_resident_key,
+            attestation_value,
+        )
         challenge_record = await create_challenge(
             db,
             flow="register",
@@ -298,13 +343,33 @@ async def passkey_register_verify(
             allowed_origins,
         )
         raise HTTPException(status_code=422, detail="Passkey verification failed")
-    challenge = await get_valid_challenge(
-        db,
-        flow="register",
-        raw_challenge=challenge_raw,
-        user_id=user.id,
-        challenge_id=challenge_id,
-    )
+    challenge = None
+    challenge_for_verify = challenge_raw
+    if challenge_id is not None:
+        challenge = await get_valid_challenge_by_id(
+            db,
+            flow="register",
+            challenge_id=challenge_id,
+            user_id=user.id,
+        )
+        if challenge is not None:
+            if challenge.challenge_raw:
+                challenge_for_verify = challenge.challenge_raw.strip()
+            elif challenge_hash(challenge_raw) != challenge.challenge_hash:
+                logger.warning(
+                    "passkey_register_verify_failed user=%s reason=challenge_mismatch_by_hash challenge_id_present=%s",
+                    user_label,
+                    bool(challenge_id),
+                )
+                raise HTTPException(status_code=400, detail="Invalid challenge")
+    else:
+        challenge = await get_valid_challenge(
+            db,
+            flow="register",
+            raw_challenge=challenge_raw,
+            user_id=user.id,
+            challenge_id=challenge_id,
+        )
     logger.info(
         "passkey_register_verify_challenge_lookup user=%s challenge_found=%s challenge_id_present=%s",
         user_label,
@@ -323,7 +388,7 @@ async def passkey_register_verify(
     try:
         verification = verify_registration_response(
             credential=payload.credential,
-            expected_challenge=base64url_to_bytes(challenge_raw),
+            expected_challenge=base64url_to_bytes(challenge_for_verify),
             expected_rp_id=get_settings().passkey_rp_id,
             expected_origin=credential_origin,
             require_user_verification=True,
@@ -515,21 +580,40 @@ async def passkey_login_verify(
             challenge_id = UUID(payload.challenge_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid challenge") from exc
-    challenge = await get_valid_challenge(
-        db,
-        flow="login",
-        raw_challenge=payload.challenge,
-        user_id=passkey.user_id,
-        challenge_id=challenge_id,
-    )
-    if challenge is None:
+    challenge = None
+    challenge_for_verify = payload.challenge
+    if challenge_id is not None:
+        challenge = await get_valid_challenge_by_id(
+            db,
+            flow="login",
+            challenge_id=challenge_id,
+            user_id=passkey.user_id,
+        )
+        if challenge is None:
+            challenge = await get_valid_challenge_by_id(
+                db,
+                flow="login",
+                challenge_id=challenge_id,
+                user_id=None,
+            )
+        if challenge is not None and challenge.challenge_raw:
+            challenge_for_verify = challenge.challenge_raw
+    else:
         challenge = await get_valid_challenge(
             db,
             flow="login",
             raw_challenge=payload.challenge,
-            user_id=None,
+            user_id=passkey.user_id,
             challenge_id=challenge_id,
         )
+        if challenge is None:
+            challenge = await get_valid_challenge(
+                db,
+                flow="login",
+                raw_challenge=payload.challenge,
+                user_id=None,
+                challenge_id=challenge_id,
+            )
     if challenge is None:
         logger.warning("passkey_login_failed reason=challenge_invalid")
         raise HTTPException(status_code=401, detail="Passkey verification failed")
@@ -542,7 +626,7 @@ async def passkey_login_verify(
     try:
         verification = verify_authentication_response(
             credential=payload.credential,
-            expected_challenge=base64url_to_bytes(payload.challenge),
+            expected_challenge=base64url_to_bytes(challenge_for_verify),
             expected_rp_id=get_settings().passkey_rp_id,
             expected_origin=credential_origin,
             credential_public_key=base64url_to_bytes(passkey.public_key),
