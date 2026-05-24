@@ -85,7 +85,6 @@ async def create_challenge(
     record = WebAuthnChallenge(
         user_id=user_id,
         challenge_hash=challenge_hash(raw_challenge),
-        challenge_raw=raw_challenge,
         flow=flow,
         expires_at=now + challenge_ttl(),
         request_ip=get_client_ip(request),

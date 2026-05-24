@@ -207,6 +207,18 @@ async def passkey_register_options(
             user_label,
             len(existing_rows),
         )
+        logger.info(
+            "passkey_register_options_context user=%s step=%s rp_id=%s rp_name=%s allowed_origins_count=%s selected_user_verification=%s selected_resident_key=%s selected_require_resident_key=%s selected_attestation=%s",
+            user_label,
+            "before_generate_registration_options",
+            get_settings().passkey_rp_id,
+            get_settings().passkey_rp_name,
+            len(get_passkey_allowed_origins()),
+            "required",
+            "preferred",
+            True,
+            "none",
+        )
         exclude = [
             PublicKeyCredentialDescriptor(id=base64url_to_bytes(row[0]))
             for row in existing_rows
@@ -353,9 +365,7 @@ async def passkey_register_verify(
             user_id=user.id,
         )
         if challenge is not None:
-            if challenge.challenge_raw:
-                challenge_for_verify = challenge.challenge_raw.strip()
-            elif challenge_hash(challenge_raw) != challenge.challenge_hash:
+            if challenge_hash(challenge_raw) != challenge.challenge_hash:
                 logger.warning(
                     "passkey_register_verify_failed user=%s reason=challenge_mismatch_by_hash challenge_id_present=%s",
                     user_label,
@@ -596,8 +606,6 @@ async def passkey_login_verify(
                 challenge_id=challenge_id,
                 user_id=None,
             )
-        if challenge is not None and challenge.challenge_raw:
-            challenge_for_verify = challenge.challenge_raw
     else:
         challenge = await get_valid_challenge(
             db,
