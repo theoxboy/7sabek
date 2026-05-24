@@ -405,15 +405,18 @@ async def passkey_register_verify(
         )
     except Exception as exc:
         logger.warning(
-            "passkey_register_verify_failed user=%s reason=crypto credential=%s type=%s message=%s expected_rp_id=%s allowed_origins=%s selected_expected_origin=%s request_origin=%s",
+            "event=passkey_register_verify_failed user=%s exception_type=%s exception_message=%s expected_rp_id=%s credential_origin=%s allowed_origins=%s selected_expected_origin=%s challenge_id_present=%s challenge_found=%s credential_keys=%s credential_response_keys=%s",
             user_label,
-            credential_masked,
             exc.__class__.__name__,
             str(exc),
             get_settings().passkey_rp_id,
+            credential_origin,
             allowed_origins,
             credential_origin,
-            _request_origin(request),
+            bool(challenge_id),
+            bool(challenge),
+            sorted(credential.keys()),
+            sorted(credential_response.keys()),
         )
         raise HTTPException(status_code=422, detail="Passkey verification failed")
 
