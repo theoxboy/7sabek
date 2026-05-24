@@ -171,6 +171,39 @@ def _request_origin(request: Request) -> Optional[str]:
     return None
 
 
+def _passkey_verify_error_detail(
+    *,
+    error_type: str,
+    error_message: str,
+    expected_rp_id: str,
+    credential_origin: Optional[str],
+    selected_expected_origin: Optional[str],
+    allowed_origins: list[str],
+    challenge_found: bool,
+    challenge_id_present: bool,
+    credential_keys: list[str],
+    credential_response_keys: list[str],
+) -> Any:
+    detail: Any = "Passkey verification failed"
+    if get_settings().passkey_debug_errors:
+        detail = {
+            "detail": "Passkey verification failed",
+            "debug": {
+                "error_type": error_type,
+                "error_message": (error_message or "")[:300],
+                "expected_rp_id": expected_rp_id,
+                "credential_origin": credential_origin,
+                "selected_expected_origin": selected_expected_origin,
+                "allowed_origins_count": len(allowed_origins),
+                "challenge_found": challenge_found,
+                "challenge_id_present": challenge_id_present,
+                "credential_keys": credential_keys,
+                "credential_response_keys": credential_response_keys,
+            },
+        }
+    return detail
+
+
 @router.get("/status", response_model=PasskeyStatusOut)
 async def passkey_status(user: User = Depends(get_current_user)) -> PasskeyStatusOut:
     settings = get_settings()
@@ -354,7 +387,21 @@ async def passkey_register_verify(
             credential_origin,
             allowed_origins,
         )
-        raise HTTPException(status_code=422, detail="Passkey verification failed")
+        raise HTTPException(
+            status_code=422,
+            detail=_passkey_verify_error_detail(
+                error_type="OriginNotAllowed",
+                error_message="Credential origin is not in allowed origins",
+                expected_rp_id=get_settings().passkey_rp_id,
+                credential_origin=credential_origin,
+                selected_expected_origin=credential_origin,
+                allowed_origins=allowed_origins,
+                challenge_found=False,
+                challenge_id_present=bool(challenge_id),
+                credential_keys=sorted(credential.keys()),
+                credential_response_keys=sorted(credential_response.keys()),
+            ),
+        )
     challenge = None
     challenge_for_verify = challenge_raw
     if challenge_id is not None:
@@ -418,7 +465,21 @@ async def passkey_register_verify(
             sorted(credential.keys()),
             sorted(credential_response.keys()),
         )
-        raise HTTPException(status_code=422, detail="Passkey verification failed")
+        raise HTTPException(
+            status_code=422,
+            detail=_passkey_verify_error_detail(
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+                expected_rp_id=get_settings().passkey_rp_id,
+                credential_origin=credential_origin,
+                selected_expected_origin=credential_origin,
+                allowed_origins=allowed_origins,
+                challenge_found=bool(challenge),
+                challenge_id_present=bool(challenge_id),
+                credential_keys=sorted(credential.keys()),
+                credential_response_keys=sorted(credential_response.keys()),
+            ),
+        )
 
     credential_id = payload.credential.get("id") or ""
     if not isinstance(credential_id, str) or not credential_id.strip():
@@ -574,7 +635,21 @@ async def passkey_login_verify(
             allowed_origins,
             request_origin,
         )
-        raise HTTPException(status_code=401, detail="Passkey verification failed")
+        raise HTTPException(
+            status_code=401,
+            detail=_passkey_verify_error_detail(
+                error_type="OriginNotAllowed",
+                error_message="Credential origin is not in allowed origins",
+                expected_rp_id=get_settings().passkey_rp_id,
+                credential_origin=credential_origin,
+                selected_expected_origin=credential_origin,
+                allowed_origins=allowed_origins,
+                challenge_found=False,
+                challenge_id_present=bool(payload.challenge_id),
+                credential_keys=sorted(credential.keys()),
+                credential_response_keys=sorted(credential_response.keys()),
+            ),
+        )
     credential_id = _extract_credential_id(payload.credential)
     passkey_result = await db.execute(
         select(UserPasskey).where(
@@ -656,7 +731,21 @@ async def passkey_login_verify(
             credential_origin,
             request_origin,
         )
-        raise HTTPException(status_code=401, detail="Passkey verification failed")
+        raise HTTPException(
+            status_code=401,
+            detail=_passkey_verify_error_detail(
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+                expected_rp_id=get_settings().passkey_rp_id,
+                credential_origin=credential_origin,
+                selected_expected_origin=credential_origin,
+                allowed_origins=allowed_origins,
+                challenge_found=bool(challenge),
+                challenge_id_present=bool(challenge_id),
+                credential_keys=sorted(credential.keys()),
+                credential_response_keys=sorted(credential_response.keys()),
+            ),
+        )
 
     consumed = await consume_challenge_atomic(db, challenge_id=challenge.id)
     if not consumed:

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     passkey_rp_id: str = "7sabek.ma"
     passkey_rp_origin: str = "https://7sabek.ma"
     passkey_allowed_origins: str = ""
+    passkey_debug_errors: bool = False
     passkey_rp_name: str = "7sabek"
     passkey_challenge_ttl_seconds: int = 300
 
