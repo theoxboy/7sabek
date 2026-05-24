@@ -13,8 +13,8 @@ class PasskeyRegisterOptionsOut(BaseModel):
 
 
 class PasskeyRegisterVerifyIn(BaseModel):
-    challenge_id: Optional[str] = Field(default=None, min_length=16, max_length=512)
-    challenge: str = Field(min_length=16, max_length=1024)
+    challenge_id: Optional[str] = Field(default=None)
+    challenge: Optional[str] = Field(default=None)
     credential: dict[str, Any]
     name: Optional[str] = Field(default=None, max_length=120)
 

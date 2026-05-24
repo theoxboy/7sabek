@@ -254,6 +254,17 @@ async def passkey_register_verify(
             challenge_id = UUID(payload.challenge_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid challenge") from exc
+    challenge_raw = (payload.challenge or "").strip()
+    credential = payload.credential if isinstance(payload.credential, dict) else {}
+    credential_response = credential.get("response") if isinstance(credential.get("response"), dict) else {}
+    logger.info(
+        "register_verify_body_received challenge_id_present=%s credential_keys=%s credential_response_keys=%s",
+        bool(challenge_id),
+        sorted(credential.keys()),
+        sorted(credential_response.keys()),
+    )
+    if not challenge_raw:
+        raise HTTPException(status_code=400, detail="Invalid challenge")
     credential_id_raw = payload.credential.get("id")
     credential_masked = (
         _safe_credential_mask(credential_id_raw)
@@ -272,7 +283,7 @@ async def passkey_register_verify(
     challenge = await get_valid_challenge(
         db,
         flow="register",
-        raw_challenge=payload.challenge,
+        raw_challenge=challenge_raw,
         user_id=user.id,
         challenge_id=challenge_id,
     )
@@ -290,7 +301,7 @@ async def passkey_register_verify(
     try:
         verification = verify_registration_response(
             credential=payload.credential,
-            expected_challenge=base64url_to_bytes(payload.challenge),
+            expected_challenge=base64url_to_bytes(challenge_raw),
             expected_rp_id=get_settings().passkey_rp_id,
             expected_origin=allowed_origins,
             require_user_verification=True,
@@ -301,7 +312,7 @@ async def passkey_register_verify(
             try:
                 verification = verify_registration_response(
                     credential=payload.credential,
-                    expected_challenge=base64url_to_bytes(payload.challenge),
+                    expected_challenge=base64url_to_bytes(challenge_raw),
                     expected_rp_id=get_settings().passkey_rp_id,
                     expected_origin=candidate_origin,
                     require_user_verification=True,
