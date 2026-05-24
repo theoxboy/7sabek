@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     passkeys_allowed_emails: str = ""
     passkey_rp_id: str = "7sabek.ma"
     passkey_rp_origin: str = "https://7sabek.ma"
+    passkey_allowed_origins: str = ""
     passkey_rp_name: str = "7sabek"
     passkey_challenge_ttl_seconds: int = 300
 
@@ -71,3 +72,27 @@ def is_passkeys_enabled_for_email(email: Optional[str]) -> bool:
     if not normalized:
         return False
     return normalized in get_passkeys_allowed_emails(settings.passkeys_allowed_emails)
+
+
+def get_passkey_allowed_origins() -> list[str]:
+    settings = get_settings()
+    raw = (settings.passkey_allowed_origins or "").strip()
+    if not raw:
+        fallback = (settings.passkey_rp_origin or "").strip()
+        return [fallback] if fallback else []
+
+    is_production = (settings.environment or "").strip().lower() == "production"
+    allowed: list[str] = []
+    for part in raw.split(","):
+        origin = part.strip()
+        if not origin:
+            continue
+        if origin.startswith("https://"):
+            allowed.append(origin)
+            continue
+        if not is_production and origin == "http://localhost:3000":
+            allowed.append(origin)
+    if not allowed:
+        fallback = (settings.passkey_rp_origin or "").strip()
+        return [fallback] if fallback else []
+    return allowed
