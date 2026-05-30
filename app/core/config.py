@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     passkey_debug_errors: bool = False
     passkey_rp_name: str = "7sabek"
     passkey_challenge_ttl_seconds: int = 300
+    email_center_enabled: bool = False
+    email_center_mode: str = "test_only"
+    email_center_kill_switch: bool = False
+    email_center_ai_suggestions_enabled: bool = False
+    email_center_allow_bulk_send: bool = False
+    email_center_allow_scheduling: bool = False
+    email_center_allow_salary_reminders: bool = False
+    email_center_allow_open_tracking: bool = False
+    email_center_allow_click_tracking: bool = False
+    email_center_test_recipient_email: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="", case_sensitive=False

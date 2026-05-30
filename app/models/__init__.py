@@ -38,6 +38,8 @@ from app.models.webauthn_challenge import WebAuthnChallenge
 from app.models.advisor_preview import AdvisorPreview
 from app.models.advisor_pre_apply_validation import AdvisorPreApplyValidation
 from app.models.advisor_decision import AdvisorDecision
+from app.models.email_design_settings import EmailDesignSettings
+from app.models.email_delivery import EmailDelivery
 
 __all__ = [
     "Category",
@@ -80,4 +82,6 @@ __all__ = [
     "AdvisorPreview",
     "AdvisorPreApplyValidation",
     "AdvisorDecision",
+    "EmailDesignSettings",
+    "EmailDelivery",
 ]
