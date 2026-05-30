@@ -1,8 +1,10 @@
 import logging
 import re
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi import Request
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -52,6 +54,10 @@ def create_app() -> FastAPI:
         redoc_url=None if is_prod_env else "/redoc",
         openapi_url=None if is_prod_env else "/openapi.json",
     )
+    assets_dir = Path("storage/email-assets")
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/email-assets", StaticFiles(directory=str(assets_dir)), name="email-assets")
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[

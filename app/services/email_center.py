@@ -132,6 +132,7 @@ def render_email_html(
     body: str,
     cta_label: str,
     cta_url: str,
+    language: str = "fr",
     manage_preferences_url: str = "",
     unsubscribe_url: str = "",
 ) -> Tuple[str, str]:
@@ -149,11 +150,16 @@ def render_email_html(
     primary_color = _safe_color(design.primary_color, "#0f172a")
     button_color = _safe_color(design.button_color, "#0f172a")
 
+    is_rtl = (language or "").strip().lower() in {"darija", "ar", "arabic"}
+    text_dir = "rtl" if is_rtl else "ltr"
+    text_align = "right" if is_rtl else "left"
+    brand_render = f'<bdi dir="ltr" style="unicode-bidi:isolate;">{brand_name}</bdi>'
+
     logo_html = (
         f'<img src="{html.escape(safe_logo)}" alt="{brand_name}" '
         'style="max-height:48px;max-width:180px;display:block;margin-bottom:16px;" />'
         if safe_logo
-        else f'<h2 style="margin:0 0 16px 0;color:{primary_color};">{brand_name}</h2>'
+        else f'<h2 style="margin:0 0 16px 0;color:{primary_color};">{brand_render}</h2>'
     )
     cta_html = (
         f'<p style="margin-top:24px;"><a href="{html.escape(safe_cta_url)}" '
@@ -183,11 +189,11 @@ def render_email_html(
     html_body = (
         "<!doctype html><html><body style=\"font-family:Arial,sans-serif;background:#f8fafc;"
         "padding:24px;\">"
-        "<div style=\"max-width:620px;margin:0 auto;background:#ffffff;border-radius:12px;"
+        f"<div dir=\"{text_dir}\" style=\"max-width:620px;margin:0 auto;background:#ffffff;border-radius:12px;"
         "padding:24px;border:1px solid #e2e8f0;\">"
         f"{logo_html}"
-        f"<h1 style=\"margin:0 0 12px 0;color:{primary_color};font-size:22px;\">{safe_subject}</h1>"
-        f"<p style=\"margin:0;color:#1e293b;line-height:1.6;\">{safe_body_html}</p>"
+        f"<h1 style=\"margin:0 0 12px 0;color:{primary_color};font-size:22px;text-align:{text_align};\">{safe_subject}</h1>"
+        f"<p style=\"margin:0;color:#1e293b;line-height:1.6;text-align:{text_align};\">{safe_body_html}</p>"
         f"{cta_html}"
         f"<hr style=\"margin:24px 0;border:none;border-top:1px solid #e2e8f0;\"/>"
         f"<p style=\"margin:0;color:#64748b;font-size:12px;\">{safe_footer}</p>"
@@ -318,6 +324,7 @@ async def send_test_email(
         body=body,
         cta_label=cta_label,
         cta_url=cta_url,
+        language=language,
     )
 
     if app_settings.email_center_kill_switch:
@@ -602,6 +609,7 @@ async def send_user_email(
         body=body,
         cta_label=cta_label,
         cta_url=cta_url,
+        language=detected_language,
     )
 
     if app_settings.email_center_kill_switch:
@@ -1158,6 +1166,7 @@ async def build_preview_user_email(
         body=content["body"],
         cta_label=content["cta_label"],
         cta_url=content["cta_url"],
+        language=detect_user_email_language(user),
     )
     return {
         "user_id": str(user.id),
@@ -1436,6 +1445,7 @@ async def send_campaign_test_email(
         body=body_value,
         cta_label=content["cta_label"],
         cta_url=content["cta_url"],
+        language=language,
     )
 
     note_value = "campaign_test:{0}".format(str(campaign.id))

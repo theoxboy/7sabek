@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import secrets
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import List, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -720,6 +722,41 @@ async def upsert_email_design(
     await db.commit()
     await db.refresh(item)
     return EmailDesignSettingsOut.model_validate(item)
+
+
+@router.post("/design/logo-upload")
+async def upload_email_design_logo(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _require_superadmin(current_user)
+    _require_enabled()
+
+    content_type = (file.content_type or "").strip().lower()
+    allowed = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/svg+xml": ".svg",
+    }
+    if content_type not in allowed:
+        raise HTTPException(status_code=400, detail="Unsupported image format")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(payload) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 2MB)")
+
+    assets_dir = Path("storage/email-assets")
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"email-logo-{secrets.token_hex(12)}{allowed[content_type]}"
+    destination = assets_dir / filename
+    destination.write_bytes(payload)
+
+    base_url = str(request.base_url).rstrip("/")
+    return {"logo_url": f"{base_url}/email-assets/{filename}"}
 
 
 @router.post("/send-test", response_model=EmailDeliveryOut)
