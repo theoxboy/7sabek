@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import html
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+import hashlib
+import hmac
+import base64
+import json
 
 import httpx
 from sqlalchemy import func, select
@@ -16,6 +20,9 @@ from app.models.email_delivery import EmailDelivery
 from app.models.email_campaign import EmailCampaign
 from app.models.email_design_settings import EmailDesignSettings
 from app.models.email_template import EmailTemplate
+from app.models.email_preference import EmailPreference
+from app.models.email_unsubscribe import EmailUnsubscribe
+from app.models.email_suppression import EmailSuppression
 from app.models.envelope import Envelope
 from app.models.onboarding_v2_record import OnboardingV2Record
 from app.models.transaction import Transaction
@@ -36,7 +43,7 @@ ALLOWED_AUDIENCE_TYPES = {
     "salary_tomorrow",
 }
 ALLOWED_CAMPAIGN_LANGUAGE_MODES = {"auto", "darija", "fr", "en"}
-ALLOWED_CAMPAIGN_STATUS = {"draft", "ready", "archived"}
+ALLOWED_CAMPAIGN_STATUS = {"draft", "ready", "queued", "archived"}
 ALLOWED_TEMPLATE_CATEGORIES = {
     "welcome",
     "onboarding_reminder",
@@ -49,6 +56,10 @@ ALLOWED_TEMPLATE_CATEGORIES = {
     "maintenance",
     "custom",
 }
+UNSUBSCRIBE_ALLOWED_CATEGORIES = {"salary_reminders", "tips", "product_updates", "marketing"}
+UNSUBSCRIBE_BLOCKED_CATEGORIES = {"security", "password_reset", "account_deletion", "transactional_critical"}
+SUPPRESSION_REASONS = {"unsubscribed", "bounced", "invalid_email", "blocked_by_admin", "deleted_user", "test_account", "complaint", "other"}
+SUPPRESSION_SOURCES = {"manual", "unsubscribe", "provider_bounce", "system", "import"}
 
 
 class EmailCenterSendTestError(Exception):
@@ -118,6 +129,8 @@ def render_email_html(
     body: str,
     cta_label: str,
     cta_url: str,
+    manage_preferences_url: str = "",
+    unsubscribe_url: str = "",
 ) -> Tuple[str, str]:
     brand_name = html.escape(design.brand_name)
     safe_subject = html.escape(subject.strip())
@@ -128,6 +141,8 @@ def render_email_html(
     safe_logo = _safe_url(design.logo_url)
     safe_cta_label = html.escape((cta_label or "").strip())
     safe_cta_url = _safe_url(cta_url)
+    safe_preferences_url = _safe_url(manage_preferences_url)
+    safe_unsubscribe_url = _safe_url(unsubscribe_url)
     primary_color = _safe_color(design.primary_color, "#0f172a")
     button_color = _safe_color(design.button_color, "#0f172a")
 
@@ -145,6 +160,22 @@ def render_email_html(
         if safe_cta_url
         else ""
     )
+    footer_links: List[str] = []
+    if safe_preferences_url:
+        footer_links.append(
+            '<a href="{0}" style="color:#64748b;text-decoration:underline;">Manage preferences</a>'.format(
+                html.escape(safe_preferences_url)
+            )
+        )
+    if safe_unsubscribe_url:
+        footer_links.append(
+            '<a href="{0}" style="color:#64748b;text-decoration:underline;">Unsubscribe</a>'.format(
+                html.escape(safe_unsubscribe_url)
+            )
+        )
+    footer_links_html = ""
+    if footer_links:
+        footer_links_html = '<p style="margin:8px 0 0 0;color:#64748b;font-size:12px;">{0}</p>'.format(" | ".join(footer_links))
 
     html_body = (
         "<!doctype html><html><body style=\"font-family:Arial,sans-serif;background:#f8fafc;"
@@ -158,6 +189,7 @@ def render_email_html(
         f"<hr style=\"margin:24px 0;border:none;border-top:1px solid #e2e8f0;\"/>"
         f"<p style=\"margin:0;color:#64748b;font-size:12px;\">{safe_footer}</p>"
         f"<p style=\"margin:8px 0 0 0;color:#64748b;font-size:12px;\">{safe_support}</p>"
+        f"{footer_links_html}"
         "</div></body></html>"
     )
     return html_body, safe_body_text
@@ -178,6 +210,9 @@ async def _create_delivery(
     note: Optional[str] = None,
     status: str = "pending",
     error_message: Optional[str] = None,
+    campaign_id=None,
+    category: Optional[str] = None,
+    queued_at: Optional[datetime] = None,
 ) -> EmailDelivery:
     delivery = EmailDelivery(
         email=email,
@@ -190,6 +225,9 @@ async def _create_delivery(
         status=status,
         provider=provider,
         note=note,
+        campaign_id=campaign_id,
+        category=category,
+        queued_at=queued_at,
         created_by_admin_id=created_by_admin_id,
         error_message=error_message,
         failed_at=datetime.now(timezone.utc) if status in {"failed", "skipped"} else None,
@@ -549,6 +587,9 @@ async def send_user_email(
             raise ValueError("EMAIL_CENTER_TEST_RECIPIENT_EMAIL is required in superadmin_only mode.")
         delivery_email = test_recipient
         delivery_note = "test_redirected"
+
+    if await is_email_suppressed(db, email=original_email, category="marketing", user_id=user.id):
+        raise ValueError("Recipient is suppressed for this category.")
 
     design = await get_or_create_design_settings(db)
     detected_language = detect_user_email_language(user)
@@ -984,6 +1025,24 @@ async def build_recipients_preview(
         if audience_type == "by_language" and normalized_language and detected_language != normalized_language:
             continue
         eligible, reason, skip_reason = _is_preview_eligible_user(user, has_content)
+        category_for_checks = "marketing"
+        if audience_type in {"salary_today", "salary_tomorrow"}:
+            category_for_checks = "salary_reminders"
+        if eligible:
+            is_enabled = await is_email_category_enabled(db, user, category_for_checks)
+            if not is_enabled:
+                eligible = False
+                reason = "skipped by preferences"
+                skip_reason = "preferences"
+        if eligible and await is_email_suppressed(
+            db,
+            email=user.email,
+            category=category_for_checks,
+            user_id=user.id,
+        ):
+            eligible = False
+            reason = "suppressed"
+            skip_reason = "suppressed"
         if template is not None and template.language != detected_language and eligible:
             reason = "matched audience; template language fallback"
         items.append(
@@ -1403,3 +1462,431 @@ async def send_campaign_test_email(
         await db.commit()
         await db.refresh(delivery)
         return delivery
+
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def _category_pref_field(category: str) -> Optional[str]:
+    mapping = {
+        "salary_reminders": "salary_reminders_enabled",
+        "tips": "tips_enabled",
+        "product_updates": "product_updates_enabled",
+        "marketing": "marketing_enabled",
+        "security": "security_emails_enabled",
+    }
+    return mapping.get((category or "").strip().lower())
+
+
+async def get_or_create_email_preferences(db: AsyncSession, user_id) -> EmailPreference:
+    result = await db.execute(select(EmailPreference).where(EmailPreference.user_id == user_id).limit(1))
+    item = result.scalar_one_or_none()
+    if item is not None:
+        return item
+    item = EmailPreference(user_id=user_id)
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def update_email_preferences(db: AsyncSession, user_id, payload: Dict[str, Any]) -> EmailPreference:
+    item = await get_or_create_email_preferences(db, user_id)
+    for key in [
+        "salary_reminders_enabled",
+        "tips_enabled",
+        "product_updates_enabled",
+        "marketing_enabled",
+    ]:
+        if key in payload and payload.get(key) is not None:
+            setattr(item, key, bool(payload.get(key)))
+    if payload.get("security_emails_enabled") is True:
+        item.security_emails_enabled = True
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def is_email_category_enabled(db: AsyncSession, user: User, category: str) -> bool:
+    normalized = (category or "").strip().lower()
+    if normalized in UNSUBSCRIBE_BLOCKED_CATEGORIES:
+        return True
+    field = _category_pref_field(normalized)
+    if field is None:
+        return True
+    prefs = await get_or_create_email_preferences(db, user.id)
+    return bool(getattr(prefs, field, True))
+
+
+def generate_unsubscribe_token(email: str, category: str) -> str:
+    settings = get_settings()
+    payload = {
+        "email": normalize_email(email),
+        "category": (category or "").strip().lower(),
+        "ts": int(datetime.now(timezone.utc).timestamp()),
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("utf-8")
+    secret = (settings.jwt_secret or "").encode("utf-8")
+    signature = hmac.new(secret, encoded.encode("utf-8"), hashlib.sha256).hexdigest()
+    return "{0}.{1}".format(encoded, signature)
+
+
+def validate_unsubscribe_token(token: str) -> Optional[Dict[str, str]]:
+    try:
+        encoded, signature = token.split(".", 1)
+    except ValueError:
+        return None
+    secret = (get_settings().jwt_secret or "").encode("utf-8")
+    expected = hmac.new(secret, encoded.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(encoded.encode("utf-8")).decode("utf-8")
+        payload = json.loads(decoded)
+    except Exception:
+        return None
+    email = normalize_email(str(payload.get("email") or ""))
+    category = (str(payload.get("category") or "")).strip().lower()
+    token_ts_raw = payload.get("ts")
+    try:
+        token_ts = int(token_ts_raw)
+    except Exception:
+        return None
+    ttl_days = max(1, int(get_settings().email_center_unsubscribe_token_ttl_days or 30))
+    expires_at = datetime.fromtimestamp(token_ts, tz=timezone.utc) + timedelta(days=ttl_days)
+    if datetime.now(timezone.utc) > expires_at:
+        return None
+    if not email or category not in UNSUBSCRIBE_ALLOWED_CATEGORIES:
+        return None
+    return {"email": email, "category": category}
+
+
+async def record_unsubscribe(
+    db: AsyncSession,
+    *,
+    email: str,
+    category: str,
+    token_hash: Optional[str] = None,
+    user_id=None,
+) -> EmailUnsubscribe:
+    normalized = normalize_email(email)
+    category_value = (category or "").strip().lower()
+    item = EmailUnsubscribe(
+        email=normalized,
+        category=category_value,
+        token_hash=token_hash,
+        user_id=user_id,
+    )
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def is_email_suppressed(
+    db: AsyncSession,
+    *,
+    email: str,
+    category: Optional[str] = None,
+    user_id=None,
+) -> bool:
+    if not get_settings().email_center_suppression_enabled:
+        return False
+    normalized = normalize_email(email)
+    category_value = (category or "").strip().lower()
+    if category_value in UNSUBSCRIBE_BLOCKED_CATEGORIES:
+        return False
+    query = select(EmailSuppression).where(
+        EmailSuppression.email == normalized,
+        EmailSuppression.is_active.is_(True),
+    )
+    if user_id is not None:
+        query = query.where((EmailSuppression.user_id.is_(None)) | (EmailSuppression.user_id == user_id))
+    if category_value:
+        query = query.where((EmailSuppression.category.is_(None)) | (EmailSuppression.category == category_value))
+    result = await db.execute(query.limit(1))
+    return result.scalar_one_or_none() is not None
+
+
+async def compute_campaign_eligible_recipients(
+    db: AsyncSession,
+    *,
+    campaign: EmailCampaign,
+    cap_plus_one: int,
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    users = await _fetch_audience_users(db, audience_type=campaign.audience_type, warnings=warnings)
+    eligible_items: List[Dict[str, Any]] = []
+    skipped_count = 0
+
+    normalized_language = ""
+    if campaign.language_mode in ALLOWED_TEMPLATE_LANGUAGES:
+        normalized_language = campaign.language_mode
+    elif isinstance(campaign.audience_filter_json, dict):
+        candidate = (campaign.audience_filter_json.get("language") or "").strip().lower()
+        if candidate in ALLOWED_TEMPLATE_LANGUAGES:
+            normalized_language = candidate
+
+    for user in users:
+        detected_language = detect_user_email_language(user)
+        if campaign.audience_type == "by_language" and normalized_language and detected_language != normalized_language:
+            continue
+
+        eligible, _reason, _skip_reason = _is_preview_eligible_user(user, True)
+        category_for_checks = "marketing"
+        if campaign.audience_type in {"salary_today", "salary_tomorrow"}:
+            category_for_checks = "salary_reminders"
+        if eligible and not await is_email_category_enabled(db, user, category_for_checks):
+            eligible = False
+        if eligible and await is_email_suppressed(
+            db,
+            email=user.email,
+            category=category_for_checks,
+            user_id=user.id,
+        ):
+            eligible = False
+
+        if not eligible:
+            skipped_count += 1
+            continue
+
+        eligible_items.append(
+            {
+                "user_id": user.id,
+                "email": user.email,
+                "detected_language": detected_language,
+            }
+        )
+        if len(eligible_items) > cap_plus_one:
+            break
+
+    return {
+        "eligible_items": eligible_items,
+        "skipped_count": skipped_count,
+        "warnings": warnings,
+    }
+
+
+async def add_email_suppression(
+    db: AsyncSession,
+    *,
+    email: str,
+    reason: str,
+    source: Optional[str] = None,
+    category: Optional[str] = None,
+    user_id=None,
+    created_by_admin_id=None,
+) -> EmailSuppression:
+    reason_value = (reason or "").strip().lower()
+    source_value = (source or "").strip().lower() or None
+    if reason_value not in SUPPRESSION_REASONS:
+        raise ValueError("Invalid suppression reason")
+    if source_value is not None and source_value not in SUPPRESSION_SOURCES:
+        raise ValueError("Invalid suppression source")
+    item = EmailSuppression(
+        email=normalize_email(email),
+        user_id=user_id,
+        category=(category or "").strip().lower() or None,
+        reason=reason_value,
+        source=source_value,
+        is_active=True,
+        created_by_admin_id=created_by_admin_id,
+    )
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def deactivate_email_suppression(db: AsyncSession, suppression: EmailSuppression) -> EmailSuppression:
+    suppression.is_active = False
+    suppression.deactivated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(suppression)
+    return suppression
+
+
+async def list_email_suppressions(
+    db: AsyncSession,
+    *,
+    q: Optional[str],
+    reason: Optional[str],
+    active_only: bool,
+    limit: int,
+    offset: int,
+) -> Tuple[List[EmailSuppression], int]:
+    query = select(EmailSuppression)
+    count_query = select(func.count(EmailSuppression.id))
+    if q:
+        needle = "%{0}%".format(normalize_email(q))
+        query = query.where(EmailSuppression.email.ilike(needle))
+        count_query = count_query.where(EmailSuppression.email.ilike(needle))
+    if reason:
+        reason_value = (reason or "").strip().lower()
+        query = query.where(EmailSuppression.reason == reason_value)
+        count_query = count_query.where(EmailSuppression.reason == reason_value)
+    if active_only:
+        query = query.where(EmailSuppression.is_active.is_(True))
+        count_query = count_query.where(EmailSuppression.is_active.is_(True))
+    total = int((await db.execute(count_query)).scalar_one() or 0)
+    result = await db.execute(query.order_by(EmailSuppression.created_at.desc()).limit(limit).offset(offset))
+    return list(result.scalars().all()), total
+
+async def enqueue_delivery(
+    db: AsyncSession,
+    *,
+    email: str,
+    recipient_user_id,
+    subject: str,
+    language: str,
+    body_html: str,
+    body_text: str,
+    provider: str,
+    created_by_admin_id,
+    campaign_id=None,
+    category: Optional[str] = None,
+    note: Optional[str] = None,
+) -> EmailDelivery:
+    return await _create_delivery(
+        db,
+        email=email,
+        original_recipient_email=email,
+        recipient_user_id=recipient_user_id,
+        subject=subject,
+        language=language,
+        body_html=body_html,
+        body_text=body_text,
+        provider=provider,
+        created_by_admin_id=created_by_admin_id,
+        campaign_id=campaign_id,
+        category=category,
+        queued_at=datetime.now(timezone.utc),
+        note=note,
+        status="pending",
+    )
+
+
+async def get_due_deliveries(db: AsyncSession, limit: int) -> List[EmailDelivery]:
+    now = datetime.now(timezone.utc)
+    query = (
+        select(EmailDelivery)
+        .where(
+            EmailDelivery.status.in_(["pending", "retry"]),
+            (EmailDelivery.next_attempt_at.is_(None)) | (EmailDelivery.next_attempt_at <= now),
+        )
+        .order_by(EmailDelivery.queued_at.asc().nullsfirst(), EmailDelivery.created_at.asc())
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def process_delivery_batch(db: AsyncSession, limit: int) -> Dict[str, int]:
+    settings = get_settings()
+    if not settings.email_center_delivery_queue_enabled:
+        return {"attempted": 0, "sent": 0, "failed": 0, "retry": 0, "remaining_pending": 0}
+    if settings.email_center_kill_switch:
+        return {"attempted": 0, "sent": 0, "failed": 0, "retry": 0, "remaining_pending": 0}
+
+    deliveries = await get_due_deliveries(db, limit)
+    attempted = len(deliveries)
+    sent = 0
+    failed = 0
+    retry = 0
+    provider = (settings.mail_provider or "mailtrap").strip().lower()
+    max_attempts = max(1, int(settings.email_center_queue_max_attempts or 3))
+    retry_delay_minutes = max(1, int(settings.email_center_queue_retry_delay_minutes or 30))
+
+    async def _mark_retry_or_failed(delivery: EmailDelivery, *, permanent: bool, status_code: Optional[int] = None) -> str:
+        if status_code is not None:
+            delivery.provider_status_code = str(status_code)
+        if permanent or int(delivery.attempt_count or 0) >= max_attempts:
+            delivery.status = "failed"
+            delivery.failed_at = datetime.now(timezone.utc)
+            return "failed"
+        delivery.status = "retry"
+        delivery.next_attempt_at = datetime.now(timezone.utc) + timedelta(minutes=retry_delay_minutes)
+        return "retry"
+
+    for delivery in deliveries:
+        try:
+            delivery.attempt_count = int(delivery.attempt_count or 0) + 1
+            delivery.last_attempt_at = datetime.now(timezone.utc)
+            delivery.status = "sending"
+            await db.commit()
+
+            if provider != "mailtrap":
+                outcome = await _mark_retry_or_failed(delivery, permanent=True)
+                if outcome == "failed":
+                    failed += 1
+                else:
+                    retry += 1
+                await db.commit()
+                continue
+
+            api_token = (settings.mailtrap_api_token or "").strip()
+            if not api_token:
+                outcome = await _mark_retry_or_failed(delivery, permanent=True)
+                if outcome == "failed":
+                    failed += 1
+                else:
+                    retry += 1
+                await db.commit()
+                continue
+
+            payload: Dict[str, Any] = {
+                "from": {"email": settings.mail_from, "name": "7sabek"},
+                "to": [{"email": delivery.email}],
+                "subject": delivery.subject,
+                "html": delivery.body_html,
+                "text": delivery.body_text,
+                "category": "Campaign Queue",
+            }
+            headers = {"Authorization": "Bearer {0}".format(api_token), "Content-Type": "application/json"}
+
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(settings.mailtrap_api_base, json=payload, headers=headers)
+                status_code = int(response.status_code)
+                delivery.provider_status_code = str(status_code)
+                if 200 <= status_code < 300:
+                    data = response.json() if response.content else {}
+                    delivery.status = "sent"
+                    delivery.sent_at = datetime.now(timezone.utc)
+                    delivery.provider_message_id = str(data.get("message_ids", [None])[0] or data.get("id") or "") or None
+                    sent += 1
+                elif status_code == 429 or status_code >= 500:
+                    outcome = await _mark_retry_or_failed(delivery, permanent=False, status_code=status_code)
+                    if outcome == "failed":
+                        failed += 1
+                    else:
+                        retry += 1
+                else:
+                    outcome = await _mark_retry_or_failed(delivery, permanent=True, status_code=status_code)
+                    if outcome == "failed":
+                        failed += 1
+                    else:
+                        retry += 1
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError):
+                outcome = await _mark_retry_or_failed(delivery, permanent=False)
+                if outcome == "failed":
+                    failed += 1
+                else:
+                    retry += 1
+
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            failed += 1
+    remaining_result = await db.execute(
+        select(func.count(EmailDelivery.id)).where(EmailDelivery.status.in_(["pending", "retry"]))
+    )
+    remaining_pending = int(remaining_result.scalar_one() or 0)
+    return {
+        "attempted": attempted,
+        "sent": sent,
+        "failed": failed,
+        "retry": retry,
+        "remaining_pending": remaining_pending,
+    }

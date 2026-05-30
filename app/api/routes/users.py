@@ -53,6 +53,8 @@ from app.services.onboarding_v2_record_state import (
 )
 from app.services.gamification import to_local_date, month_start
 from app.services.profile_photo import normalize_profile_photo_url
+from app.services.email_center import get_or_create_email_preferences, update_email_preferences
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import (
     Category,
@@ -111,8 +113,32 @@ from app.schemas.onboarding_v2 import (
 from app.schemas.user_profile import UserProfileUpdate
 from app.schemas.user_settings import UserSettingsOut, UserSettingsUpdate
 from app.schemas.shiftpilot import ShiftPilotStateOut, ShiftPilotStateUpsertIn
+from app.schemas.email_center import EmailPreferenceOut, EmailPreferenceUpdate
 
 router = APIRouter(prefix="/users")
+
+
+@router.get("/me/email-preferences", response_model=EmailPreferenceOut)
+async def get_my_email_preferences(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailPreferenceOut:
+    if not get_settings().email_center_preferences_enabled:
+        raise HTTPException(status_code=403, detail="Email preferences disabled")
+    item = await get_or_create_email_preferences(db, current_user.id)
+    return EmailPreferenceOut.model_validate(item)
+
+
+@router.patch("/me/email-preferences", response_model=EmailPreferenceOut)
+async def patch_my_email_preferences(
+    payload: EmailPreferenceUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailPreferenceOut:
+    if not get_settings().email_center_preferences_enabled:
+        raise HTTPException(status_code=403, detail="Email preferences disabled")
+    item = await update_email_preferences(db, current_user.id, payload.model_dump(exclude_unset=True))
+    return EmailPreferenceOut.model_validate(item)
 
 
 def _build_user_session_history_out(

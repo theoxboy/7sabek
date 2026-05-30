@@ -32,6 +32,19 @@ class EmailCampaign(Base):
     cta_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     design_settings_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     estimated_recipient_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_dry_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_test_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_admin_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    send_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    send_finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    total_recipients: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_sent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_failed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_skipped: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_by_admin_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

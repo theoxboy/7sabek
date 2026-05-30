@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,6 +27,16 @@ class EmailDelivery(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     provider: Mapped[str] = mapped_column(String(50), nullable=False, default="mailtrap")
     provider_message_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    campaign_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("email_campaigns.id", ondelete="SET NULL"), nullable=True
+    )
+    category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    queued_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    provider_status_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    provider_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_by_admin_id: Mapped[Optional[UUID]] = mapped_column(

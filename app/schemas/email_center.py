@@ -145,6 +145,11 @@ class EmailCenterSystemStatusFlagsOut(BaseModel):
     recipient_preview_enabled: bool
     campaigns_enabled: bool
     campaign_test_send_enabled: bool
+    preferences_enabled: bool
+    suppression_enabled: bool
+    delivery_queue_enabled: bool
+    bulk_require_test_send: bool
+    bulk_require_dry_run: bool
 
 
 class EmailCenterAISuggestIn(BaseModel):
@@ -243,6 +248,10 @@ class EmailCenterSystemStatusCapabilitiesOut(BaseModel):
     recipient_preview: str
     campaigns: str
     campaign_test_send: str
+    preferences: str
+    suppression: str
+    bulk_send_capability: str
+    queue: str
 
 
 class EmailCenterSystemStatusAIOut(BaseModel):
@@ -273,6 +282,11 @@ class EmailCenterSystemStatusStatsOut(BaseModel):
     sent: int
     failed: int
     skipped: int
+    retry: int
+    suppression_count: Optional[int] = None
+    active_suppression_count: Optional[int] = None
+    pending_deliveries_count: int = 0
+    retry_deliveries_count: int = 0
     latest_delivery_at: Optional[datetime] = None
 
 
@@ -282,15 +296,34 @@ class EmailCenterSystemStatusCampaignsOut(BaseModel):
     campaign_capability: str
 
 
+class EmailCenterSystemStatusBulkOut(BaseModel):
+    bulk_send_enabled: bool
+    bulk_max_recipients: int
+    require_test_send: bool
+    require_dry_run: bool
+    confirmation_text: str
+
+
+class EmailCenterSystemStatusQueueOut(BaseModel):
+    delivery_queue_enabled: bool
+    batch_size: int
+    max_attempts: int
+    retry_delay_minutes: int
+    rate_limit_per_minute: int
+
+
 class EmailCenterSystemStatusOut(BaseModel):
     enabled: bool
     mode: str
     kill_switch: bool
+    unsubscribe_token_ttl_days: int
     flags: EmailCenterSystemStatusFlagsOut
     mail_provider: EmailCenterSystemStatusMailProviderOut
     ai: EmailCenterSystemStatusAIOut
     templates: EmailCenterSystemStatusTemplatesOut
     campaigns: EmailCenterSystemStatusCampaignsOut
+    bulk: EmailCenterSystemStatusBulkOut
+    queue: EmailCenterSystemStatusQueueOut
     database: EmailCenterSystemStatusDatabaseOut
     capabilities: EmailCenterSystemStatusCapabilitiesOut
     safety: EmailCenterSystemStatusSafetyOut
@@ -355,6 +388,10 @@ class CampaignSendTestIn(BaseModel):
     test_email: Optional[str] = Field(default=None, max_length=255)
 
 
+class CampaignSendIn(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=40)
+
+
 class EmailCampaignCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     type: str = Field(default="manual", max_length=40)
@@ -406,6 +443,17 @@ class EmailCampaignOut(BaseModel):
     cta_url: Optional[str] = None
     design_settings_json: Optional[Dict[str, Any]] = None
     estimated_recipient_count: Optional[int] = None
+    last_dry_run_at: Optional[datetime] = None
+    last_test_sent_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    approved_by_admin_id: Optional[UUID] = None
+    sent_at: Optional[datetime] = None
+    send_started_at: Optional[datetime] = None
+    send_finished_at: Optional[datetime] = None
+    total_recipients: Optional[int] = None
+    total_sent: Optional[int] = None
+    total_failed: Optional[int] = None
+    total_skipped: Optional[int] = None
     created_by_admin_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
@@ -418,3 +466,100 @@ class EmailCampaignListOut(BaseModel):
     items: List[EmailCampaignOut]
     limit: int
     offset: int
+
+
+class EmailPreferenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    salary_reminders_enabled: bool
+    tips_enabled: bool
+    product_updates_enabled: bool
+    marketing_enabled: bool
+    security_emails_enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailPreferencePublicOut(BaseModel):
+    email: str
+    salary_reminders_enabled: bool
+    tips_enabled: bool
+    product_updates_enabled: bool
+    marketing_enabled: bool
+    security_emails_enabled: bool
+
+
+class EmailPreferenceUpdate(BaseModel):
+    salary_reminders_enabled: Optional[bool] = None
+    tips_enabled: Optional[bool] = None
+    product_updates_enabled: Optional[bool] = None
+    marketing_enabled: Optional[bool] = None
+    security_emails_enabled: Optional[bool] = None
+
+
+class EmailUnsubscribeRequest(BaseModel):
+    token: str = Field(min_length=10, max_length=1000)
+
+
+class EmailSuppressionCreate(BaseModel):
+    email: EmailStr
+    user_id: Optional[UUID] = None
+    category: Optional[str] = Field(default=None, max_length=50)
+    reason: str = Field(min_length=1, max_length=50)
+    source: Optional[str] = Field(default=None, max_length=50)
+
+
+class EmailSuppressionUpdate(BaseModel):
+    category: Optional[str] = Field(default=None, max_length=50)
+    reason: Optional[str] = Field(default=None, max_length=50)
+    source: Optional[str] = Field(default=None, max_length=50)
+    is_active: Optional[bool] = None
+
+
+class EmailSuppressionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    email: str
+    user_id: Optional[UUID] = None
+    category: Optional[str] = None
+    reason: str
+    source: Optional[str] = None
+    is_active: bool
+    created_by_admin_id: Optional[UUID] = None
+    created_at: datetime
+    updated_at: datetime
+    deactivated_at: Optional[datetime] = None
+
+
+class EmailSuppressionListOut(BaseModel):
+    items: List[EmailSuppressionOut]
+    limit: int
+    offset: int
+    total: int
+
+
+class DeliveryQueueProcessIn(BaseModel):
+    limit: int = Field(default=20, ge=1, le=500)
+
+
+class DeliveryQueueProcessOut(BaseModel):
+    attempted: int
+    sent: int
+    failed: int
+    retry: int
+    remaining_pending: int
+
+
+class DeliveryQueueStatusOut(BaseModel):
+    pending_count: int
+    retry_count: int
+    failed_count: int
+    sent_today: int
+    next_due_count: int
+    batch_size: int
+    max_attempts: int
+    retry_delay_minutes: int
+    rate_limit_per_minute: int

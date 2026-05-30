@@ -42,6 +42,9 @@ from app.models.email_design_settings import EmailDesignSettings
 from app.models.email_delivery import EmailDelivery
 from app.models.email_campaign import EmailCampaign
 from app.models.email_template import EmailTemplate
+from app.models.email_preference import EmailPreference
+from app.models.email_unsubscribe import EmailUnsubscribe
+from app.models.email_suppression import EmailSuppression
 
 __all__ = [
     "Category",
@@ -88,4 +91,7 @@ __all__ = [
     "EmailDelivery",
     "EmailCampaign",
     "EmailTemplate",
+    "EmailPreference",
+    "EmailUnsubscribe",
+    "EmailSuppression",
 ]

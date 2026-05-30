@@ -58,6 +58,18 @@ class Settings(BaseSettings):
     email_center_recipient_preview_enabled: bool = False
     email_center_campaigns_enabled: bool = False
     email_center_campaign_test_send_enabled: bool = False
+    email_center_preferences_enabled: bool = False
+    email_center_suppression_enabled: bool = False
+    email_center_unsubscribe_token_ttl_days: int = 30
+    email_center_bulk_max_recipients: int = 100
+    email_center_bulk_require_test_send: bool = True
+    email_center_bulk_require_dry_run: bool = True
+    email_center_bulk_confirmation_text: str = "SEND"
+    email_center_delivery_queue_enabled: bool = False
+    email_center_queue_batch_size: int = 20
+    email_center_queue_max_attempts: int = 3
+    email_center_queue_retry_delay_minutes: int = 30
+    email_center_queue_rate_limit_per_minute: int = 50
     email_center_test_recipient_email: str = ""
 
     model_config = SettingsConfigDict(

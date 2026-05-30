@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import List, Union
 from uuid import UUID
 
@@ -16,6 +17,7 @@ from app.models import (
     EmailCampaign,
     EmailDelivery,
     EmailDesignSettings,
+    EmailSuppression,
     Envelope,
     OnboardingV2Record,
     Transaction,
@@ -25,6 +27,7 @@ from app.models import (
 from app.models.email_template import EmailTemplate
 from app.schemas.email_center import (
     CampaignSendTestIn,
+    CampaignSendIn,
     EmailCenterAISuggestIn,
     EmailCenterAISuggestOut,
     EmailCampaignCreate,
@@ -35,6 +38,8 @@ from app.schemas.email_center import (
     EmailCenterSystemStatusAIOut,
     EmailCenterSystemStatusCapabilitiesOut,
     EmailCenterSystemStatusCampaignsOut,
+    EmailCenterSystemStatusBulkOut,
+    EmailCenterSystemStatusQueueOut,
     EmailCenterSystemStatusDatabaseOut,
     EmailCenterSystemStatusFlagsOut,
     EmailCenterSystemStatusMailProviderOut,
@@ -45,6 +50,13 @@ from app.schemas.email_center import (
     EmailCenterUserPreviewOut,
     EmailCenterUserSearchListOut,
     EmailCenterUserSearchOut,
+    EmailSuppressionCreate,
+    EmailSuppressionUpdate,
+    EmailSuppressionOut,
+    EmailSuppressionListOut,
+    DeliveryQueueProcessIn,
+    DeliveryQueueProcessOut,
+    DeliveryQueueStatusOut,
     EmailDeliveryHistoryOut,
     EmailDeliveryOut,
     EmailDesignSettingsIn,
@@ -83,6 +95,12 @@ from app.services.email_center import (
     seed_default_email_templates,
     send_campaign_test_email,
     send_user_email,
+    add_email_suppression,
+    deactivate_email_suppression,
+    list_email_suppressions,
+    process_delivery_batch,
+    enqueue_delivery,
+    compute_campaign_eligible_recipients,
     send_test_email,
     soft_delete_email_campaign,
     duplicate_email_campaign,
@@ -159,6 +177,16 @@ def _require_campaigns_enabled_for_write() -> None:
         raise HTTPException(status_code=403, detail="Campaign drafts disabled")
 
 
+def _require_preferences_enabled() -> None:
+    if not get_settings().email_center_preferences_enabled:
+        raise HTTPException(status_code=403, detail="Email preferences disabled")
+
+
+def _require_suppression_enabled() -> None:
+    if not get_settings().email_center_suppression_enabled:
+        raise HTTPException(status_code=403, detail="Suppression list disabled")
+
+
 @router.get("/system-status", response_model=EmailCenterSystemStatusOut)
 async def get_email_center_system_status(
     db: AsyncSession = Depends(get_db),
@@ -188,6 +216,7 @@ async def get_email_center_system_status(
     sent_count = 0
     failed_count = 0
     skipped_count = 0
+    retry_count = 0
     latest_delivery_at = None
     templates_count = None
     active_templates_count = None
@@ -196,7 +225,7 @@ async def get_email_center_system_status(
         total_result = await db.execute(select(func.count(EmailDelivery.id)))
         total_deliveries = int(total_result.scalar_one() or 0)
 
-        for status_key in ["pending", "sent", "failed", "skipped"]:
+        for status_key in ["pending", "sent", "failed", "skipped", "retry"]:
             count_result = await db.execute(
                 select(func.count(EmailDelivery.id)).where(EmailDelivery.status == status_key)
             )
@@ -209,6 +238,8 @@ async def get_email_center_system_status(
                 failed_count = count_value
             elif status_key == "skipped":
                 skipped_count = count_value
+            elif status_key == "retry":
+                retry_count = count_value
 
         latest_result = await db.execute(select(func.max(EmailDelivery.created_at)))
         latest_delivery_at = latest_result.scalar_one_or_none()
@@ -236,6 +267,16 @@ async def get_email_center_system_status(
     except Exception:
         campaign_drafts_count = None
         campaigns_migration_required = True
+    suppression_count = None
+    active_suppression_count = None
+    suppression_migration_required = False
+    try:
+        suppression_count = int((await db.execute(select(func.count(EmailSuppression.id)))).scalar_one() or 0)
+        active_suppression_count = int(
+            (await db.execute(select(func.count(EmailSuppression.id)).where(EmailSuppression.is_active.is_(True)))).scalar_one() or 0
+        )
+    except Exception:
+        suppression_migration_required = True
 
     mode_value = (settings.email_center_mode or "").strip().lower()
     test_recipient_configured = bool((settings.email_center_test_recipient_email or "").strip())
@@ -279,6 +320,7 @@ async def get_email_center_system_status(
         enabled=settings.email_center_enabled,
         mode=settings.email_center_mode,
         kill_switch=settings.email_center_kill_switch,
+        unsubscribe_token_ttl_days=max(1, int(settings.email_center_unsubscribe_token_ttl_days or 30)),
         flags=EmailCenterSystemStatusFlagsOut(
             ai_suggestions_enabled=settings.email_center_ai_suggestions_enabled,
             allow_user_send=settings.email_center_allow_user_send,
@@ -291,6 +333,11 @@ async def get_email_center_system_status(
             recipient_preview_enabled=settings.email_center_recipient_preview_enabled,
             campaigns_enabled=campaigns_enabled,
             campaign_test_send_enabled=campaign_test_send_enabled,
+            preferences_enabled=settings.email_center_preferences_enabled,
+            suppression_enabled=settings.email_center_suppression_enabled,
+            delivery_queue_enabled=settings.email_center_delivery_queue_enabled,
+            bulk_require_test_send=settings.email_center_bulk_require_test_send,
+            bulk_require_dry_run=settings.email_center_bulk_require_dry_run,
         ),
         mail_provider=EmailCenterSystemStatusMailProviderOut(
             provider=settings.mail_provider,
@@ -315,6 +362,20 @@ async def get_email_center_system_status(
             campaign_drafts_count=campaign_drafts_count,
             campaign_capability=campaigns_capability,
         ),
+        bulk=EmailCenterSystemStatusBulkOut(
+            bulk_send_enabled=settings.email_center_allow_bulk_send,
+            bulk_max_recipients=settings.email_center_bulk_max_recipients,
+            require_test_send=settings.email_center_bulk_require_test_send,
+            require_dry_run=settings.email_center_bulk_require_dry_run,
+            confirmation_text=settings.email_center_bulk_confirmation_text,
+        ),
+        queue=EmailCenterSystemStatusQueueOut(
+            delivery_queue_enabled=settings.email_center_delivery_queue_enabled,
+            batch_size=settings.email_center_queue_batch_size,
+            max_attempts=settings.email_center_queue_max_attempts,
+            retry_delay_minutes=settings.email_center_queue_retry_delay_minutes,
+            rate_limit_per_minute=settings.email_center_queue_rate_limit_per_minute,
+        ),
         database=EmailCenterSystemStatusDatabaseOut(
             email_design_settings_table=design_table_ok,
             email_deliveries_table=deliveries_table_ok,
@@ -337,6 +398,18 @@ async def get_email_center_system_status(
             ),
             campaigns=campaigns_capability,
             campaign_test_send=campaign_test_send_capability,
+            preferences=("ready" if settings.email_center_preferences_enabled else "disabled"),
+            suppression=("migration_required" if suppression_migration_required else ("ready" if settings.email_center_suppression_enabled else "disabled")),
+            bulk_send_capability=(
+                "blocked_by_kill_switch"
+                if settings.email_center_kill_switch
+                else ("ready" if settings.email_center_allow_bulk_send else "disabled")
+            ),
+            queue=(
+                "blocked_by_kill_switch"
+                if settings.email_center_kill_switch
+                else ("ready" if settings.email_center_delivery_queue_enabled else "disabled")
+            ),
         ),
         safety=EmailCenterSystemStatusSafetyOut(
             bulk_send_blocked=not settings.email_center_allow_bulk_send,
@@ -353,6 +426,11 @@ async def get_email_center_system_status(
             sent=sent_count,
             failed=failed_count,
             skipped=skipped_count,
+            retry=retry_count,
+            suppression_count=suppression_count,
+            active_suppression_count=active_suppression_count,
+            pending_deliveries_count=pending_count,
+            retry_deliveries_count=retry_count,
             latest_delivery_at=latest_delivery_at,
         ),
     )
@@ -1033,6 +1111,8 @@ async def campaign_recipients_preview(
     if item is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     data = await build_campaign_recipients_preview(db, campaign=item, limit=limit)
+    item.last_dry_run_at = func.now()
+    await db.commit()
     return RecipientsPreviewOut(
         enabled=True,
         audience_type=item.audience_type,
@@ -1075,3 +1155,231 @@ async def campaign_send_test(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return EmailDeliveryOut.model_validate(delivery)
+
+@router.get("/suppressions", response_model=EmailSuppressionListOut)
+async def get_suppressions(
+    q: str = Query(default=""),
+    reason: str = Query(default=""),
+    active_only: bool = Query(default=True),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailSuppressionListOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_suppression_enabled()
+    items, total = await list_email_suppressions(
+        db,
+        q=q or None,
+        reason=reason or None,
+        active_only=active_only,
+        limit=limit,
+        offset=offset,
+    )
+    return EmailSuppressionListOut(
+        items=[EmailSuppressionOut.model_validate(item) for item in items],
+        limit=limit,
+        offset=offset,
+        total=total,
+    )
+
+
+@router.post("/suppressions", response_model=EmailSuppressionOut)
+async def create_suppression(
+    payload: EmailSuppressionCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailSuppressionOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_suppression_enabled()
+    item = await add_email_suppression(
+        db,
+        email=str(payload.email),
+        user_id=payload.user_id,
+        category=payload.category,
+        reason=payload.reason,
+        source=payload.source,
+        created_by_admin_id=current_user.id,
+    )
+    return EmailSuppressionOut.model_validate(item)
+
+
+@router.patch("/suppressions/{suppression_id}", response_model=EmailSuppressionOut)
+async def patch_suppression(
+    suppression_id: UUID,
+    payload: EmailSuppressionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailSuppressionOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_suppression_enabled()
+    item = (await db.execute(select(EmailSuppression).where(EmailSuppression.id == suppression_id).limit(1))).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Suppression not found")
+    updates = payload.model_dump(exclude_unset=True)
+    if "reason" in updates and updates.get("reason") is not None:
+        item.reason = str(updates.get("reason")).strip().lower()
+    if "category" in updates:
+        item.category = (str(updates.get("category") or "").strip().lower() or None)
+    if "source" in updates:
+        item.source = (str(updates.get("source") or "").strip().lower() or None)
+    if "is_active" in updates and updates.get("is_active") is False:
+        item.is_active = False
+    await db.commit()
+    await db.refresh(item)
+    return EmailSuppressionOut.model_validate(item)
+
+
+@router.delete("/suppressions/{suppression_id}", response_model=EmailSuppressionOut)
+async def delete_suppression(
+    suppression_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailSuppressionOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_suppression_enabled()
+    item = (await db.execute(select(EmailSuppression).where(EmailSuppression.id == suppression_id).limit(1))).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Suppression not found")
+    item = await deactivate_email_suppression(db, item)
+    return EmailSuppressionOut.model_validate(item)
+
+
+@router.post("/campaigns/{campaign_id}/send")
+async def send_campaign_bulk_queue(
+    campaign_id: UUID,
+    payload: CampaignSendIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _require_superadmin(current_user)
+    _require_enabled()
+    settings = get_settings()
+    if not settings.email_center_allow_bulk_send:
+        raise HTTPException(status_code=403, detail="Bulk send disabled")
+    if settings.email_center_kill_switch:
+        raise HTTPException(status_code=403, detail="Kill switch active")
+    if payload.confirmation.strip() != settings.email_center_bulk_confirmation_text:
+        raise HTTPException(status_code=422, detail="Invalid confirmation")
+    campaign = await get_email_campaign_by_id(db, campaign_id=campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.status != "ready":
+        raise HTTPException(status_code=422, detail="Campaign must be ready")
+    if settings.email_center_bulk_require_dry_run and campaign.last_dry_run_at is None:
+        raise HTTPException(status_code=422, detail="Dry run is required")
+    if settings.email_center_bulk_require_test_send and campaign.last_test_sent_at is None:
+        raise HTTPException(status_code=422, detail="Test send is required")
+
+    max_recipients = max(1, int(settings.email_center_bulk_max_recipients or 100))
+    recipients_result = await compute_campaign_eligible_recipients(
+        db,
+        campaign=campaign,
+        cap_plus_one=max_recipients + 1,
+    )
+    eligible = list(recipients_result.get("eligible_items") or [])
+    if len(eligible) > max_recipients:
+        raise HTTPException(status_code=422, detail="Recipient count exceeds configured max")
+
+    design = await get_or_create_design_settings(db)
+    created = 0
+    provider = (settings.mail_provider or "mailtrap").strip().lower()
+    total_eligible = len(eligible)
+    for item in eligible:
+        body_html, body_text = render_email_html(
+            design=design,
+            subject="Campaign queued: {0}".format(campaign.title),
+            body="This campaign message is queued safely.",
+            cta_label="",
+            cta_url="",
+        )
+        await enqueue_delivery(
+            db,
+            email=item["email"],
+            recipient_user_id=item["user_id"],
+            subject="Campaign queued: {0}".format(campaign.title),
+            language=item.get("detected_language") or "fr",
+            body_html=body_html,
+            body_text=body_text,
+            provider=provider,
+            created_by_admin_id=current_user.id,
+            campaign_id=campaign.id,
+            category="marketing",
+            note="campaign_bulk",
+        )
+        created += 1
+    campaign.approved_at = campaign.approved_at or func.now()
+    campaign.approved_by_admin_id = current_user.id
+    campaign.send_started_at = func.now()
+    campaign.total_recipients = int(total_eligible + int(recipients_result.get("skipped_count") or 0))
+    campaign.total_skipped = int(recipients_result.get("skipped_count") or 0)
+    campaign.status = "ready" if not settings.email_center_delivery_queue_enabled else "queued"
+    await db.commit()
+    await db.refresh(campaign)
+    return {
+        "status": "ok",
+        "total_eligible": total_eligible,
+        "queued_count": created,
+        "skipped_count": campaign.total_skipped,
+    }
+
+
+@router.post("/delivery-queue/process", response_model=DeliveryQueueProcessOut)
+async def process_queue(
+    payload: DeliveryQueueProcessIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DeliveryQueueProcessOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    settings = get_settings()
+    if not settings.email_center_delivery_queue_enabled:
+        raise HTTPException(status_code=403, detail="Delivery queue disabled")
+    if settings.email_center_kill_switch:
+        raise HTTPException(status_code=403, detail="Kill switch active")
+    result = await process_delivery_batch(db, min(payload.limit, settings.email_center_queue_batch_size))
+    return DeliveryQueueProcessOut(**result)
+
+
+@router.get("/delivery-queue/status", response_model=DeliveryQueueStatusOut)
+async def delivery_queue_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DeliveryQueueStatusOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    settings = get_settings()
+    pending_count = int((await db.execute(select(func.count(EmailDelivery.id)).where(EmailDelivery.status == "pending"))).scalar_one() or 0)
+    retry_count = int((await db.execute(select(func.count(EmailDelivery.id)).where(EmailDelivery.status == "retry"))).scalar_one() or 0)
+    failed_count = int((await db.execute(select(func.count(EmailDelivery.id)).where(EmailDelivery.status == "failed"))).scalar_one() or 0)
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    sent_today = int(
+        (
+            await db.execute(
+                select(func.count(EmailDelivery.id)).where(
+                    EmailDelivery.status == "sent",
+                    EmailDelivery.sent_at.is_not(None),
+                    EmailDelivery.sent_at >= day_start,
+                    EmailDelivery.sent_at < day_end,
+                )
+            )
+        ).scalar_one()
+        or 0
+    )
+    next_due_count = int((await db.execute(select(func.count(EmailDelivery.id)).where(EmailDelivery.status.in_(["pending", "retry"])))).scalar_one() or 0)
+    return DeliveryQueueStatusOut(
+        pending_count=pending_count,
+        retry_count=retry_count,
+        failed_count=failed_count,
+        sent_today=sent_today,
+        next_due_count=next_due_count,
+        batch_size=settings.email_center_queue_batch_size,
+        max_attempts=settings.email_center_queue_max_attempts,
+        retry_delay_minutes=settings.email_center_queue_retry_delay_minutes,
+        rate_limit_per_minute=settings.email_center_queue_rate_limit_per_minute,
+    )
