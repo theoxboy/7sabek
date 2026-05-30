@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import List, Union
 from uuid import UUID
 
@@ -61,6 +62,7 @@ from app.schemas.email_center import (
     SendTestEmailIn,
 )
 from app.services.email_center import (
+    EmailCenterSendTestError,
     build_campaign_recipients_preview,
     build_preview_user_email,
     build_recipients_preview,
@@ -99,6 +101,7 @@ from app.services.ai_gateway_client import (
 )
 
 router = APIRouter(prefix="/superadmin/email-center")
+logger = logging.getLogger("app.email_center")
 TEMPLATE_ALLOWED_LANGUAGES = {"darija", "fr", "en"}
 TEMPLATE_ALLOWED_CATEGORIES = {
     "welcome",
@@ -627,6 +630,9 @@ async def send_email_test(
 ) -> EmailDeliveryOut:
     _require_superadmin(current_user)
     _require_enabled()
+    settings = get_settings()
+    mode_value = (settings.email_center_mode or "test_only").strip().lower()
+    provider = (settings.mail_provider or "mailtrap").strip().lower()
     if not payload.subject.strip() or not payload.body.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -645,7 +651,54 @@ async def send_email_test(
             cta_url=payload.cta_url,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={"detail": str(exc), "error_type": "validation_error"},
+        ) from exc
+    except EmailCenterSendTestError as exc:
+        logger.exception(
+            "event=email_center_send_test_failed exception_type=%s exception_message=%s step=%s "
+            "email_center_mode=%s email_center_enabled=%s kill_switch=%s provider=%s "
+            "mail_from_configured=%s token_configured=%s api_base_configured=%s "
+            "test_recipient_configured=%s",
+            type(exc).__name__,
+            str(exc),
+            exc.step,
+            mode_value,
+            bool(settings.email_center_enabled),
+            bool(settings.email_center_kill_switch),
+            provider,
+            bool((settings.mail_from or "").strip()),
+            bool((settings.mailtrap_api_token or "").strip()),
+            bool((settings.mailtrap_api_base or "").strip()),
+            bool((settings.email_center_test_recipient_email or "").strip()),
+        )
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"detail": exc.message, "error_type": exc.error_type},
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "event=email_center_send_test_failed exception_type=%s exception_message=%s step=%s "
+            "email_center_mode=%s email_center_enabled=%s kill_switch=%s provider=%s "
+            "mail_from_configured=%s token_configured=%s api_base_configured=%s "
+            "test_recipient_configured=%s",
+            type(exc).__name__,
+            str(exc),
+            "route_unhandled_exception",
+            mode_value,
+            bool(settings.email_center_enabled),
+            bool(settings.email_center_kill_switch),
+            provider,
+            bool((settings.mail_from or "").strip()),
+            bool((settings.mailtrap_api_token or "").strip()),
+            bool((settings.mailtrap_api_base or "").strip()),
+            bool((settings.email_center_test_recipient_email or "").strip()),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={"detail": "Failed to send test email", "error_type": "internal_error"},
+        ) from exc
     return EmailDeliveryOut.model_validate(delivery)
 
 

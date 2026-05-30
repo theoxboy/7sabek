@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import html
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -19,6 +20,8 @@ from app.models.envelope import Envelope
 from app.models.onboarding_v2_record import OnboardingV2Record
 from app.models.transaction import Transaction
 from app.models.user import User
+
+logger = logging.getLogger("app.email_center")
 
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 SIMPLE_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -46,6 +49,28 @@ ALLOWED_TEMPLATE_CATEGORIES = {
     "maintenance",
     "custom",
 }
+
+
+class EmailCenterSendTestError(Exception):
+    def __init__(self, message: str, *, error_type: str, http_status: int, step: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.error_type = error_type
+        self.http_status = http_status
+        self.step = step
+
+
+def _send_test_safe_runtime_context(app_settings, provider: str) -> Dict[str, Any]:
+    return {
+        "email_center_mode": (app_settings.email_center_mode or "").strip().lower(),
+        "email_center_enabled": bool(app_settings.email_center_enabled),
+        "kill_switch": bool(app_settings.email_center_kill_switch),
+        "provider": provider,
+        "mail_from_configured": bool((app_settings.mail_from or "").strip()),
+        "token_configured": bool((app_settings.mailtrap_api_token or "").strip()),
+        "api_base_configured": bool((app_settings.mailtrap_api_base or "").strip()),
+        "test_recipient_configured": bool((app_settings.email_center_test_recipient_email or "").strip()),
+    }
 
 
 def _safe_color(value: str, fallback: str) -> str:
@@ -191,10 +216,59 @@ async def send_test_email(
     mode = (app_settings.email_center_mode or "test_only").strip().lower()
     test_recipient = (app_settings.email_center_test_recipient_email or "").strip().lower()
     normalized_to = to_email.strip().lower()
+    safe_ctx = _send_test_safe_runtime_context(app_settings, provider=provider)
+
+    async def _mark_failed_delivery(
+        *,
+        delivery: EmailDelivery,
+        safe_error_message: str,
+        step: str,
+        user_message: str,
+        error_type: str,
+        http_status: int,
+    ) -> None:
+        delivery.status = "failed"
+        delivery.error_message = safe_error_message[:500]
+        delivery.failed_at = datetime.now(timezone.utc)
+        try:
+            await db.commit()
+            await db.refresh(delivery)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "event=email_center_send_test_failed exception_type=%s exception_message=%s step=%s "
+                "email_center_mode=%s email_center_enabled=%s kill_switch=%s provider=%s "
+                "mail_from_configured=%s token_configured=%s api_base_configured=%s "
+                "test_recipient_configured=%s",
+                type(exc).__name__,
+                str(exc),
+                "save_failed_delivery",
+                safe_ctx["email_center_mode"],
+                safe_ctx["email_center_enabled"],
+                safe_ctx["kill_switch"],
+                safe_ctx["provider"],
+                safe_ctx["mail_from_configured"],
+                safe_ctx["token_configured"],
+                safe_ctx["api_base_configured"],
+                safe_ctx["test_recipient_configured"],
+            )
+            raise EmailCenterSendTestError(
+                "Failed to save email delivery status.",
+                error_type="db_error",
+                http_status=500,
+                step="save_failed_delivery",
+            ) from exc
+        raise EmailCenterSendTestError(
+            user_message,
+            error_type=error_type,
+            http_status=http_status,
+            step=step,
+        )
 
     if mode == "test_only":
-        if not test_recipient or normalized_to != test_recipient:
-            raise ValueError("Test mode only allows EMAIL_CENTER_TEST_RECIPIENT_EMAIL.")
+        if not test_recipient:
+            raise ValueError("EMAIL_CENTER_TEST_RECIPIENT_EMAIL is required.")
+        if normalized_to != test_recipient:
+            raise ValueError("test recipient must match EMAIL_CENTER_TEST_RECIPIENT_EMAIL.")
 
     design = await get_or_create_design_settings(db)
     body_html, body_text = render_email_html(
@@ -206,7 +280,47 @@ async def send_test_email(
     )
 
     if app_settings.email_center_kill_switch:
-        return await _create_delivery(
+        try:
+            return await _create_delivery(
+                db,
+                email=normalized_to,
+                original_recipient_email=normalized_to,
+                subject=subject.strip(),
+                language=language,
+                body_html=body_html,
+                body_text=body_text,
+                provider=provider,
+                created_by_admin_id=admin_user.id,
+                status="skipped",
+                error_message="Email center kill switch is active.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "event=email_center_send_test_failed exception_type=%s exception_message=%s step=%s "
+                "email_center_mode=%s email_center_enabled=%s kill_switch=%s provider=%s "
+                "mail_from_configured=%s token_configured=%s api_base_configured=%s "
+                "test_recipient_configured=%s",
+                type(exc).__name__,
+                str(exc),
+                "create_skipped_delivery",
+                safe_ctx["email_center_mode"],
+                safe_ctx["email_center_enabled"],
+                safe_ctx["kill_switch"],
+                safe_ctx["provider"],
+                safe_ctx["mail_from_configured"],
+                safe_ctx["token_configured"],
+                safe_ctx["api_base_configured"],
+                safe_ctx["test_recipient_configured"],
+            )
+            raise EmailCenterSendTestError(
+                "Failed to save email delivery.",
+                error_type="db_error",
+                http_status=500,
+                step="create_skipped_delivery",
+            ) from exc
+
+    try:
+        delivery = await _create_delivery(
             db,
             email=normalized_to,
             original_recipient_email=normalized_to,
@@ -216,39 +330,125 @@ async def send_test_email(
             body_text=body_text,
             provider=provider,
             created_by_admin_id=admin_user.id,
-            status="skipped",
-            error_message="Email center kill switch is active.",
+            status="pending",
         )
-
-    delivery = await _create_delivery(
-        db,
-        email=normalized_to,
-        original_recipient_email=normalized_to,
-        subject=subject.strip(),
-        language=language,
-        body_html=body_html,
-        body_text=body_text,
-        provider=provider,
-        created_by_admin_id=admin_user.id,
-        status="pending",
-    )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "event=email_center_send_test_failed exception_type=%s exception_message=%s step=%s "
+            "email_center_mode=%s email_center_enabled=%s kill_switch=%s provider=%s "
+            "mail_from_configured=%s token_configured=%s api_base_configured=%s "
+            "test_recipient_configured=%s",
+            type(exc).__name__,
+            str(exc),
+            "create_pending_delivery",
+            safe_ctx["email_center_mode"],
+            safe_ctx["email_center_enabled"],
+            safe_ctx["kill_switch"],
+            safe_ctx["provider"],
+            safe_ctx["mail_from_configured"],
+            safe_ctx["token_configured"],
+            safe_ctx["api_base_configured"],
+            safe_ctx["test_recipient_configured"],
+        )
+        raise EmailCenterSendTestError(
+            "Failed to save email delivery.",
+            error_type="db_error",
+            http_status=500,
+            step="create_pending_delivery",
+        ) from exc
 
     if provider != "mailtrap":
-        delivery.status = "failed"
-        delivery.error_message = "Unsupported mail provider."
-        delivery.failed_at = datetime.now(timezone.utc)
-        await db.commit()
-        await db.refresh(delivery)
-        return delivery
+        await _mark_failed_delivery(
+            delivery=delivery,
+            safe_error_message="Unsupported mail provider.",
+            step="validate_provider",
+            user_message="Email provider failed",
+            error_type="provider_error",
+            http_status=502,
+        )
 
     api_token = (app_settings.mailtrap_api_token or "").strip()
     if not api_token:
-        delivery.status = "failed"
-        delivery.error_message = "MAILTRAP_API_TOKEN is missing."
-        delivery.failed_at = datetime.now(timezone.utc)
+        await _mark_failed_delivery(
+            delivery=delivery,
+            safe_error_message="MAILTRAP_API_TOKEN is missing.",
+            step="validate_provider_token",
+            user_message="Email provider failed",
+            error_type="provider_error",
+            http_status=502,
+        )
+
+    payload: Dict[str, Any] = {
+        "from": {"email": app_settings.mail_from, "name": design.brand_name or "7sabek"},
+        "to": [{"email": normalized_to}],
+        "subject": subject.strip(),
+        "html": body_html,
+        "text": body_text,
+        "category": "Superadmin Test",
+    }
+    headers = {"Authorization": "Bearer {0}".format(api_token), "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(app_settings.mailtrap_api_base, json=payload, headers=headers)
+            status_code = int(response.status_code)
+            if status_code not in {200, 202}:
+                await _mark_failed_delivery(
+                    delivery=delivery,
+                    safe_error_message="Provider returned status {0}".format(status_code),
+                    step="provider_http_status",
+                    user_message="Email provider failed",
+                    error_type="provider_error",
+                    http_status=502,
+                )
+            data: Any = {}
+            if response.content:
+                try:
+                    data = response.json()
+                except ValueError:
+                    data = {}
+        provider_message_id = None
+        if isinstance(data, dict):
+            message_ids = data.get("message_ids")
+            if isinstance(message_ids, list) and message_ids:
+                provider_message_id = str(message_ids[0] or "") or None
+            if provider_message_id is None:
+                provider_message_id = str(data.get("id") or "") or None
+        delivery.status = "sent"
+        delivery.sent_at = datetime.now(timezone.utc)
+        delivery.provider_message_id = provider_message_id
+        if delivery.error_message:
+            delivery.error_message = None
         await db.commit()
         await db.refresh(delivery)
         return delivery
+    except EmailCenterSendTestError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "event=email_center_send_test_failed exception_type=%s exception_message=%s step=%s "
+            "email_center_mode=%s email_center_enabled=%s kill_switch=%s provider=%s "
+            "mail_from_configured=%s token_configured=%s api_base_configured=%s "
+            "test_recipient_configured=%s",
+            type(exc).__name__,
+            str(exc),
+            "provider_request",
+            safe_ctx["email_center_mode"],
+            safe_ctx["email_center_enabled"],
+            safe_ctx["kill_switch"],
+            safe_ctx["provider"],
+            safe_ctx["mail_from_configured"],
+            safe_ctx["token_configured"],
+            safe_ctx["api_base_configured"],
+            safe_ctx["test_recipient_configured"],
+        )
+        await _mark_failed_delivery(
+            delivery=delivery,
+            safe_error_message="Send failed: {0}".format(type(exc).__name__),
+            step="provider_request",
+            user_message="Email provider failed",
+            error_type="provider_error",
+            http_status=502,
+        )
 
 
 def detect_user_email_language(user: User) -> str:
@@ -438,37 +638,6 @@ async def send_user_email(
         await db.commit()
         await db.refresh(delivery)
         return delivery
-
-    payload: Dict[str, Any] = {
-        "from": {"email": app_settings.mail_from, "name": design.brand_name or "7sabek"},
-        "to": [{"email": normalized_to}],
-        "subject": subject.strip(),
-        "html": body_html,
-        "text": body_text,
-        "category": "Superadmin Test",
-    }
-    headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(app_settings.mailtrap_api_base, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json() if response.content else {}
-        delivery.status = "sent"
-        delivery.sent_at = datetime.now(timezone.utc)
-        delivery.provider_message_id = str(
-            data.get("message_ids", [None])[0] or data.get("id") or ""
-        ) or None
-        await db.commit()
-        await db.refresh(delivery)
-        return delivery
-    except Exception as exc:  # noqa: BLE001
-        delivery.status = "failed"
-        delivery.error_message = f"Send failed: {type(exc).__name__}"
-        delivery.failed_at = datetime.now(timezone.utc)
-        await db.commit()
-        await db.refresh(delivery)
-        return delivery
-
 
 async def get_delivery_history(
     db: AsyncSession, *, page: int, page_size: int
