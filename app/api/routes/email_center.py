@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Union
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,7 +76,7 @@ async def get_email_design(
 @router.post("/design", response_model=EmailDesignSettingsOut)
 @router.patch("/design", response_model=EmailDesignSettingsOut)
 async def upsert_email_design(
-    payload: EmailDesignSettingsIn | EmailDesignSettingsPatch,
+    payload: Union[EmailDesignSettingsIn, EmailDesignSettingsPatch],
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> EmailDesignSettingsOut:

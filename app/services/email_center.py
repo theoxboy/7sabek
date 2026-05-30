@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import html
 import re
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -63,7 +63,7 @@ def render_email_html(
     body: str,
     cta_label: str,
     cta_url: str,
-) -> tuple[str, str]:
+) -> Tuple[str, str]:
     brand_name = html.escape(design.brand_name)
     safe_subject = html.escape(subject.strip())
     safe_body_html = _escape_text_to_html(body)
@@ -119,7 +119,7 @@ async def _create_delivery(
     provider: str,
     created_by_admin_id,
     status: str = "pending",
-    error_message: str | None = None,
+    error_message: Optional[str] = None,
 ) -> EmailDelivery:
     delivery = EmailDelivery(
         email=email,
@@ -212,7 +212,7 @@ async def send_test_email(
         await db.refresh(delivery)
         return delivery
 
-    payload: dict[str, Any] = {
+    payload: Dict[str, Any] = {
         "from": {"email": app_settings.mail_from, "name": design.brand_name or "7sabek"},
         "to": [{"email": normalized_to}],
         "subject": subject.strip(),
@@ -245,7 +245,7 @@ async def send_test_email(
 
 async def get_delivery_history(
     db: AsyncSession, *, page: int, page_size: int
-) -> tuple[list[EmailDelivery], int]:
+) -> Tuple[List[EmailDelivery], int]:
     total_result = await db.execute(select(func.count(EmailDelivery.id)))
     total = int(total_result.scalar_one() or 0)
     query = (

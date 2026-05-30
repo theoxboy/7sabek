@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -85,7 +85,7 @@ class EmailDeliveryOut(BaseModel):
 
 
 class EmailDeliveryHistoryOut(BaseModel):
-    items: list[EmailDeliveryOut]
+    items: List[EmailDeliveryOut]
     page: int
     page_size: int
     total: int
