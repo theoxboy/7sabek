@@ -112,23 +112,29 @@ async def _create_delivery(
     db: AsyncSession,
     *,
     email: str,
+    original_recipient_email: Optional[str],
+    recipient_user_id=None,
     subject: str,
     language: str,
     body_html: str,
     body_text: str,
     provider: str,
     created_by_admin_id,
+    note: Optional[str] = None,
     status: str = "pending",
     error_message: Optional[str] = None,
 ) -> EmailDelivery:
     delivery = EmailDelivery(
         email=email,
+        original_recipient_email=original_recipient_email,
+        recipient_user_id=recipient_user_id,
         subject=subject,
         language=language,
         body_html=body_html,
         body_text=body_text,
         status=status,
         provider=provider,
+        note=note,
         created_by_admin_id=created_by_admin_id,
         error_message=error_message,
         failed_at=datetime.now(timezone.utc) if status in {"failed", "skipped"} else None,
@@ -173,6 +179,7 @@ async def send_test_email(
         return await _create_delivery(
             db,
             email=normalized_to,
+            original_recipient_email=normalized_to,
             subject=subject.strip(),
             language=language,
             body_html=body_html,
@@ -186,6 +193,7 @@ async def send_test_email(
     delivery = await _create_delivery(
         db,
         email=normalized_to,
+        original_recipient_email=normalized_to,
         subject=subject.strip(),
         language=language,
         body_html=body_html,
@@ -207,6 +215,195 @@ async def send_test_email(
     if not api_token:
         delivery.status = "failed"
         delivery.error_message = "MAILTRAP_API_TOKEN is missing."
+        delivery.failed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery
+
+
+def detect_user_email_language(user: User) -> str:
+    supported = {"darija", "fr", "en"}
+    candidates: List[Optional[str]] = []
+
+    for attr in ("language", "locale", "preferred_language"):
+        candidates.append(getattr(user, attr, None))
+
+    for attr in ("settings", "profile", "preferences", "metadata"):
+        container = getattr(user, attr, None)
+        if isinstance(container, dict):
+            candidates.append(container.get("language"))
+            candidates.append(container.get("locale"))
+            candidates.append(container.get("preferred_language"))
+
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        normalized = candidate.strip().lower()
+        if normalized in {"ar", "ar-ma", "darija", "ma"}:
+            return "darija"
+        if normalized in {"fr", "fr-fr", "fr-ma"}:
+            return "fr"
+        if normalized in {"en", "en-us", "en-gb"}:
+            return "en"
+        if normalized in supported:
+            return normalized
+    return "darija"
+
+
+def build_user_display_name(user: User) -> str:
+    first_name = (getattr(user, "first_name", None) or "").strip()
+    last_name = (getattr(user, "last_name", None) or "").strip()
+    full_name = " ".join(part for part in [first_name, last_name] if part)
+    return full_name or user.email
+
+
+async def search_users_for_email_center(
+    db: AsyncSession, *, query: str, limit: int = 10
+) -> List[User]:
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return []
+    safe_limit = max(1, min(limit, 10))
+    ilike_value = "%" + normalized_query + "%"
+    result = await db.execute(
+        select(User)
+        .where(
+            User.deleted_at.is_(None),
+            (
+                User.email.ilike(ilike_value)
+                | User.first_name.ilike(ilike_value)
+                | User.last_name.ilike(ilike_value)
+            ),
+        )
+        .order_by(User.created_at.desc())
+        .limit(safe_limit)
+    )
+    return list(result.scalars().all())
+
+
+async def get_user_by_id_for_email_center(
+    db: AsyncSession, *, user_id
+) -> Optional[User]:
+    result = await db.execute(
+        select(User).where(User.id == user_id, User.deleted_at.is_(None)).limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def send_user_email(
+    db: AsyncSession,
+    *,
+    admin_user: User,
+    user: User,
+    subject: str,
+    body: str,
+    cta_label: str,
+    cta_url: str,
+) -> EmailDelivery:
+    app_settings = get_settings()
+    provider = (app_settings.mail_provider or "mailtrap").strip().lower()
+    mode = (app_settings.email_center_mode or "test_only").strip().lower()
+    test_recipient = (app_settings.email_center_test_recipient_email or "").strip().lower()
+    original_email = (user.email or "").strip().lower()
+    delivery_email = original_email
+    delivery_note = None
+
+    if not app_settings.email_center_allow_user_send:
+        raise ValueError("User send is disabled by EMAIL_CENTER_ALLOW_USER_SEND.")
+    if mode == "test_only":
+        raise ValueError("User send is disabled in test_only mode.")
+    if mode not in {"superadmin_only", "production"}:
+        raise ValueError("Unsupported EMAIL_CENTER_MODE for user send.")
+    if mode == "superadmin_only":
+        if not test_recipient:
+            raise ValueError("EMAIL_CENTER_TEST_RECIPIENT_EMAIL is required in superadmin_only mode.")
+        delivery_email = test_recipient
+        delivery_note = "test_redirected"
+
+    design = await get_or_create_design_settings(db)
+    detected_language = detect_user_email_language(user)
+    body_html, body_text = render_email_html(
+        design=design,
+        subject=subject,
+        body=body,
+        cta_label=cta_label,
+        cta_url=cta_url,
+    )
+
+    if app_settings.email_center_kill_switch:
+        return await _create_delivery(
+            db,
+            email=delivery_email,
+            original_recipient_email=original_email,
+            recipient_user_id=user.id,
+            subject=subject.strip(),
+            language=detected_language,
+            body_html=body_html,
+            body_text=body_text,
+            provider=provider,
+            created_by_admin_id=admin_user.id,
+            note=delivery_note,
+            status="skipped",
+            error_message="Email center kill switch is active.",
+        )
+
+    delivery = await _create_delivery(
+        db,
+        email=delivery_email,
+        original_recipient_email=original_email,
+        recipient_user_id=user.id,
+        subject=subject.strip(),
+        language=detected_language,
+        body_html=body_html,
+        body_text=body_text,
+        provider=provider,
+        created_by_admin_id=admin_user.id,
+        note=delivery_note,
+        status="pending",
+    )
+
+    if provider != "mailtrap":
+        delivery.status = "failed"
+        delivery.error_message = "Unsupported mail provider."
+        delivery.failed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery
+
+    api_token = (app_settings.mailtrap_api_token or "").strip()
+    if not api_token:
+        delivery.status = "failed"
+        delivery.error_message = "MAILTRAP_API_TOKEN is missing."
+        delivery.failed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery
+
+    payload: Dict[str, Any] = {
+        "from": {"email": app_settings.mail_from, "name": design.brand_name or "7sabek"},
+        "to": [{"email": delivery_email}],
+        "subject": subject.strip(),
+        "html": body_html,
+        "text": body_text,
+        "category": "Superadmin User",
+    }
+    headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(app_settings.mailtrap_api_base, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json() if response.content else {}
+        delivery.status = "sent"
+        delivery.sent_at = datetime.now(timezone.utc)
+        delivery.provider_message_id = str(
+            data.get("message_ids", [None])[0] or data.get("id") or ""
+        ) or None
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery
+    except Exception as exc:  # noqa: BLE001
+        delivery.status = "failed"
+        delivery.error_message = f"Send failed: {type(exc).__name__}"
         delivery.failed_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(delivery)

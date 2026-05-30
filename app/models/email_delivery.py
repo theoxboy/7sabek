@@ -16,6 +16,7 @@ class EmailDelivery(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
+    original_recipient_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     recipient_user_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -26,6 +27,7 @@ class EmailDelivery(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     provider: Mapped[str] = mapped_column(String(50), nullable=False, default="mailtrap")
     provider_message_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_by_admin_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True

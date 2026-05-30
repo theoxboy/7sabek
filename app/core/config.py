@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     email_center_kill_switch: bool = False
     email_center_ai_suggestions_enabled: bool = False
     email_center_allow_bulk_send: bool = False
+    email_center_allow_user_send: bool = False
     email_center_allow_scheduling: bool = False
     email_center_allow_salary_reminders: bool = False
     email_center_allow_open_tracking: bool = False

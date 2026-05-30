@@ -15,6 +15,7 @@ class EmailCenterStatusOut(BaseModel):
     mail_from: str
     test_recipient_email: str
     allow_bulk_send: bool
+    allow_user_send: bool
     allow_scheduling: bool
     allow_salary_reminders: bool
     allow_ai_suggestions: bool
@@ -68,6 +69,7 @@ class EmailDeliveryOut(BaseModel):
 
     id: UUID
     email: str
+    original_recipient_email: Optional[str] = None
     recipient_user_id: Optional[UUID] = None
     subject: str
     language: str
@@ -76,6 +78,7 @@ class EmailDeliveryOut(BaseModel):
     status: str
     provider: str
     provider_message_id: Optional[str] = None
+    note: Optional[str] = None
     error_message: Optional[str] = None
     created_by_admin_id: Optional[UUID] = None
     sent_at: Optional[datetime] = None
@@ -89,3 +92,41 @@ class EmailDeliveryHistoryOut(BaseModel):
     page: int
     page_size: int
     total: int
+
+
+class EmailCenterUserSearchOut(BaseModel):
+    id: UUID
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: str
+    detected_language: str
+
+
+class EmailCenterUserSearchListOut(BaseModel):
+    items: List[EmailCenterUserSearchOut]
+
+
+class EmailCenterUserPreviewIn(BaseModel):
+    subject: str = Field(min_length=1, max_length=300)
+    body: str = Field(min_length=1, max_length=20000)
+    cta_label: str = Field(default="", max_length=120)
+    cta_url: str = Field(default="", max_length=500)
+
+
+class EmailCenterUserPreviewOut(BaseModel):
+    user_id: UUID
+    email: str
+    display_name: str
+    detected_language: str
+    subject: str
+    body_html: str
+    body_text: str
+
+
+class SendUserEmailIn(BaseModel):
+    user_id: UUID
+    subject: str = Field(min_length=1, max_length=300)
+    body: str = Field(min_length=1, max_length=20000)
+    cta_label: str = Field(default="", max_length=120)
+    cta_url: str = Field(default="", max_length=500)
