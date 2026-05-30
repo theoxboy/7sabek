@@ -130,3 +130,68 @@ class SendUserEmailIn(BaseModel):
     body: str = Field(min_length=1, max_length=20000)
     cta_label: str = Field(default="", max_length=120)
     cta_url: str = Field(default="", max_length=500)
+
+
+class EmailCenterSystemStatusFlagsOut(BaseModel):
+    ai_suggestions_enabled: bool
+    allow_user_send: bool
+    allow_bulk_send: bool
+    allow_scheduling: bool
+    allow_salary_reminders: bool
+    allow_open_tracking: bool
+    allow_click_tracking: bool
+
+
+class EmailCenterSystemStatusMailProviderOut(BaseModel):
+    provider: str
+    from_email: str
+    api_base_configured: bool
+    token_configured: bool
+
+
+class EmailCenterSystemStatusDatabaseOut(BaseModel):
+    email_design_settings_table: bool
+    email_deliveries_table: bool
+    error: Optional[str] = None
+
+
+class EmailCenterSystemStatusCapabilitiesOut(BaseModel):
+    send_test: bool
+    design_settings: bool
+    history: bool
+    user_search: bool
+    user_preview: bool
+    send_user: bool
+    bulk_send: bool
+    scheduling: bool
+    salary_reminders: bool
+    ai_suggestions: bool
+
+
+class EmailCenterSystemStatusSafetyOut(BaseModel):
+    bulk_send_blocked: bool
+    scheduling_blocked: bool
+    salary_reminders_blocked: bool
+    test_recipient_configured: bool
+    production_send_enabled: bool
+
+
+class EmailCenterSystemStatusStatsOut(BaseModel):
+    total_deliveries: int
+    pending: int
+    sent: int
+    failed: int
+    skipped: int
+    latest_delivery_at: Optional[datetime] = None
+
+
+class EmailCenterSystemStatusOut(BaseModel):
+    enabled: bool
+    mode: str
+    kill_switch: bool
+    flags: EmailCenterSystemStatusFlagsOut
+    mail_provider: EmailCenterSystemStatusMailProviderOut
+    database: EmailCenterSystemStatusDatabaseOut
+    capabilities: EmailCenterSystemStatusCapabilitiesOut
+    safety: EmailCenterSystemStatusSafetyOut
+    stats: EmailCenterSystemStatusStatsOut
