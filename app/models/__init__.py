@@ -40,6 +40,7 @@ from app.models.advisor_pre_apply_validation import AdvisorPreApplyValidation
 from app.models.advisor_decision import AdvisorDecision
 from app.models.email_design_settings import EmailDesignSettings
 from app.models.email_delivery import EmailDelivery
+from app.models.email_template import EmailTemplate
 
 __all__ = [
     "Category",
@@ -84,4 +85,5 @@ __all__ = [
     "AdvisorDecision",
     "EmailDesignSettings",
     "EmailDelivery",
+    "EmailTemplate",
 ]

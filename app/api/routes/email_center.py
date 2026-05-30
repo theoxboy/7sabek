@@ -14,13 +14,16 @@ from app.db.session import get_db
 from app.models import (
     EmailDelivery,
     EmailDesignSettings,
-    EmailTemplate,
     Envelope,
     OnboardingV2Record,
     Transaction,
     User,
     UserPasskey,
 )
+try:
+    from app.models.email_template import EmailTemplate
+except Exception:  # pragma: no cover
+    EmailTemplate = None  # type: ignore[assignment]
 from app.schemas.email_center import (
     EmailCenterAISuggestIn,
     EmailCenterAISuggestOut,
@@ -88,7 +91,7 @@ def _require_enabled() -> None:
 
 
 def _templates_enabled() -> bool:
-    return bool(get_settings().email_center_templates_enabled)
+    return bool(get_settings().email_center_templates_enabled) and EmailTemplate is not None
 
 
 def _require_templates_enabled_for_write() -> None:
@@ -148,16 +151,17 @@ async def get_email_center_system_status(
 
         latest_result = await db.execute(select(func.max(EmailDelivery.created_at)))
         latest_delivery_at = latest_result.scalar_one_or_none()
-    try:
-        template_total_result = await db.execute(select(func.count(EmailTemplate.id)))
-        templates_count = int(template_total_result.scalar_one() or 0)
-        active_template_result = await db.execute(
-            select(func.count(EmailTemplate.id)).where(EmailTemplate.is_active.is_(True))
-        )
-        active_templates_count = int(active_template_result.scalar_one() or 0)
-    except Exception:
-        templates_count = 0
-        active_templates_count = 0
+    if EmailTemplate is not None:
+        try:
+            template_total_result = await db.execute(select(func.count(EmailTemplate.id)))
+            templates_count = int(template_total_result.scalar_one() or 0)
+            active_template_result = await db.execute(
+                select(func.count(EmailTemplate.id)).where(EmailTemplate.is_active.is_(True))
+            )
+            active_templates_count = int(active_template_result.scalar_one() or 0)
+        except Exception:
+            templates_count = 0
+            active_templates_count = 0
 
     mode_value = (settings.email_center_mode or "").strip().lower()
     test_recipient_configured = bool((settings.email_center_test_recipient_email or "").strip())
@@ -170,7 +174,9 @@ async def get_email_center_system_status(
         "disabled" if not ai_enabled else "missing_config"
     )
     templates_enabled = bool(settings.email_center_templates_enabled)
-    if not templates_enabled:
+    if EmailTemplate is None:
+        templates_capability = "not_implemented"
+    elif not templates_enabled:
         templates_capability = "disabled"
     elif active_templates_count > 0:
         templates_capability = "ready"

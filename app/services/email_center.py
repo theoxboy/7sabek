@@ -13,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.email_delivery import EmailDelivery
 from app.models.email_design_settings import EmailDesignSettings
-from app.models.email_template import EmailTemplate
+try:
+    from app.models.email_template import EmailTemplate
+except Exception:  # pragma: no cover
+    EmailTemplate = None  # type: ignore[assignment]
 from app.models.user import User
 
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -487,6 +490,8 @@ async def list_email_templates(
     category: Optional[str] = None,
     active_only: bool = False,
 ) -> List[EmailTemplate]:
+    if EmailTemplate is None:
+        return []
     query = select(EmailTemplate).order_by(EmailTemplate.created_at.desc())
     if language:
         query = query.where(EmailTemplate.language == _normalize_template_language(language))
@@ -513,6 +518,8 @@ async def create_email_template(
     cta_url: Optional[str],
     is_active: bool,
 ) -> EmailTemplate:
+    if EmailTemplate is None:
+        raise ValueError("Email templates are not implemented on this backend build")
     clean_key = (key or "").strip() or None
     if clean_key:
         exists = await db.execute(select(EmailTemplate.id).where(EmailTemplate.key == clean_key))
@@ -544,6 +551,8 @@ async def update_email_template(
     template: EmailTemplate,
     updates: Dict[str, Any],
 ) -> EmailTemplate:
+    if EmailTemplate is None:
+        raise ValueError("Email templates are not implemented on this backend build")
     if "key" in updates:
         key_value = (updates.get("key") or "").strip() or None
         if key_value and key_value != template.key:
@@ -577,11 +586,15 @@ async def update_email_template(
 
 
 async def get_email_template_by_id(db: AsyncSession, template_id) -> Optional[EmailTemplate]:
+    if EmailTemplate is None:
+        return None
     result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id).limit(1))
     return result.scalar_one_or_none()
 
 
 async def deactivate_email_template(db: AsyncSession, template: EmailTemplate) -> EmailTemplate:
+    if EmailTemplate is None:
+        raise ValueError("Email templates are not implemented on this backend build")
     template.is_active = False
     await db.commit()
     await db.refresh(template)
@@ -642,6 +655,8 @@ def _default_template_rows() -> List[Dict[str, str]]:
 
 
 async def seed_default_email_templates(db: AsyncSession, *, admin_user: User) -> int:
+    if EmailTemplate is None:
+        return 0
     inserted = 0
     for row in _default_template_rows():
         existing = await db.execute(select(EmailTemplate.id).where(EmailTemplate.key == row["key"]))
