@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     email_center_allow_salary_reminders: bool = False
     email_center_allow_open_tracking: bool = False
     email_center_allow_click_tracking: bool = False
+    email_center_recipient_preview_enabled: bool = False
+    email_center_campaigns_enabled: bool = False
+    email_center_campaign_test_send_enabled: bool = False
     email_center_test_recipient_email: str = ""
 
     model_config = SettingsConfigDict(

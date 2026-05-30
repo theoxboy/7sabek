@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Union
+from typing import List, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.core.platform_settings import get_platform_settings
 from app.db.session import get_db
 from app.models import (
+    EmailCampaign,
     EmailDelivery,
     EmailDesignSettings,
     Envelope,
@@ -22,11 +23,17 @@ from app.models import (
 )
 from app.models.email_template import EmailTemplate
 from app.schemas.email_center import (
+    CampaignSendTestIn,
     EmailCenterAISuggestIn,
     EmailCenterAISuggestOut,
+    EmailCampaignCreate,
+    EmailCampaignListOut,
+    EmailCampaignOut,
+    EmailCampaignUpdate,
     EmailCenterStatusOut,
     EmailCenterSystemStatusAIOut,
     EmailCenterSystemStatusCapabilitiesOut,
+    EmailCenterSystemStatusCampaignsOut,
     EmailCenterSystemStatusDatabaseOut,
     EmailCenterSystemStatusFlagsOut,
     EmailCenterSystemStatusMailProviderOut,
@@ -46,24 +53,41 @@ from app.schemas.email_center import (
     EmailTemplateListOut,
     EmailTemplateOut,
     EmailTemplateUpdate,
+    RecipientsPreviewIn,
+    RecipientsPreviewOut,
+    RecipientsPreviewUserEmailIn,
+    RecipientsPreviewUserEmailOut,
     SendUserEmailIn,
     SendTestEmailIn,
 )
 from app.services.email_center import (
+    build_campaign_recipients_preview,
+    build_preview_user_email,
+    build_recipients_preview,
     build_user_display_name,
+    create_email_campaign,
     detect_user_email_language,
     deactivate_email_template,
     create_email_template,
     get_email_template_by_id,
+    get_email_campaign_by_id,
     get_delivery_history,
     get_or_create_design_settings,
     get_user_by_id_for_email_center,
     list_email_templates,
+    list_email_campaigns,
     render_email_html,
     search_users_for_email_center,
     seed_default_email_templates,
+    send_campaign_test_email,
     send_user_email,
     send_test_email,
+    soft_delete_email_campaign,
+    duplicate_email_campaign,
+    update_email_campaign,
+    validate_campaign_audience_type,
+    validate_campaign_language_mode,
+    validate_campaign_status,
     update_email_template,
 )
 from app.services.ai_gateway_client import (
@@ -104,6 +128,10 @@ def _templates_enabled() -> bool:
     return bool(get_settings().email_center_templates_enabled)
 
 
+def _campaigns_enabled() -> bool:
+    return bool(get_settings().email_center_campaigns_enabled)
+
+
 def _validate_template_language(value: str) -> str:
     normalized = (value or "").strip().lower()
     if normalized not in TEMPLATE_ALLOWED_LANGUAGES:
@@ -121,6 +149,11 @@ def _validate_template_category(value: str) -> str:
 def _require_templates_enabled_for_write() -> None:
     if not _templates_enabled():
         raise HTTPException(status_code=403, detail="Email templates disabled")
+
+
+def _require_campaigns_enabled_for_write() -> None:
+    if not _campaigns_enabled():
+        raise HTTPException(status_code=403, detail="Campaign drafts disabled")
 
 
 @router.get("/system-status", response_model=EmailCenterSystemStatusOut)
@@ -155,6 +188,7 @@ async def get_email_center_system_status(
     latest_delivery_at = None
     templates_count = None
     active_templates_count = None
+    campaign_drafts_count = None
     if deliveries_table_ok:
         total_result = await db.execute(select(func.count(EmailDelivery.id)))
         total_deliveries = int(total_result.scalar_one() or 0)
@@ -187,6 +221,18 @@ async def get_email_center_system_status(
         templates_count = None
         active_templates_count = None
         templates_migration_required = True
+    campaigns_migration_required = False
+    try:
+        campaigns_count_result = await db.execute(
+            select(func.count(EmailCampaign.id)).where(
+                EmailCampaign.deleted_at.is_(None),
+                EmailCampaign.status.in_(["draft", "ready"]),
+            )
+        )
+        campaign_drafts_count = int(campaigns_count_result.scalar_one() or 0)
+    except Exception:
+        campaign_drafts_count = None
+        campaigns_migration_required = True
 
     mode_value = (settings.email_center_mode or "").strip().lower()
     test_recipient_configured = bool((settings.email_center_test_recipient_email or "").strip())
@@ -207,6 +253,24 @@ async def get_email_center_system_status(
         templates_capability = "ready"
     else:
         templates_capability = "no_templates"
+    campaigns_enabled = bool(settings.email_center_campaigns_enabled)
+    if campaigns_migration_required:
+        campaigns_capability = "migration_required"
+    elif not campaigns_enabled:
+        campaigns_capability = "disabled"
+    elif int(campaign_drafts_count or 0) > 0:
+        campaigns_capability = "ready"
+    else:
+        campaigns_capability = "no_campaigns"
+    campaign_test_send_enabled = bool(settings.email_center_campaign_test_send_enabled)
+    campaign_test_send_capability = "disabled"
+    if campaign_test_send_enabled:
+        if settings.email_center_kill_switch:
+            campaign_test_send_capability = "blocked_by_kill_switch"
+        elif not test_recipient_configured:
+            campaign_test_send_capability = "missing_test_recipient"
+        else:
+            campaign_test_send_capability = "ready"
 
     return EmailCenterSystemStatusOut(
         enabled=settings.email_center_enabled,
@@ -221,6 +285,9 @@ async def get_email_center_system_status(
             templates_enabled=templates_enabled,
             allow_open_tracking=settings.email_center_allow_open_tracking,
             allow_click_tracking=settings.email_center_allow_click_tracking,
+            recipient_preview_enabled=settings.email_center_recipient_preview_enabled,
+            campaigns_enabled=campaigns_enabled,
+            campaign_test_send_enabled=campaign_test_send_enabled,
         ),
         mail_provider=EmailCenterSystemStatusMailProviderOut(
             provider=settings.mail_provider,
@@ -240,6 +307,11 @@ async def get_email_center_system_status(
             active_templates_count=active_templates_count,
             templates_capability=templates_capability,
         ),
+        campaigns=EmailCenterSystemStatusCampaignsOut(
+            campaigns_enabled=campaigns_enabled,
+            campaign_drafts_count=campaign_drafts_count,
+            campaign_capability=campaigns_capability,
+        ),
         database=EmailCenterSystemStatusDatabaseOut(
             email_design_settings_table=design_table_ok,
             email_deliveries_table=deliveries_table_ok,
@@ -257,6 +329,11 @@ async def get_email_center_system_status(
             salary_reminders=False,
             ai_suggestions=ai_capability == "ready",
             templates=templates_capability == "ready",
+            recipient_preview=(
+                "ready" if settings.email_center_recipient_preview_enabled else "disabled"
+            ),
+            campaigns=campaigns_capability,
+            campaign_test_send=campaign_test_send_capability,
         ),
         safety=EmailCenterSystemStatusSafetyOut(
             bulk_send_blocked=not settings.email_center_allow_bulk_send,
@@ -582,12 +659,13 @@ async def get_email_history(
     _require_superadmin(current_user)
     _require_enabled()
     items, total = await get_delivery_history(db, page=page, page_size=page_size)
-    return EmailDeliveryHistoryOut(
-        items=[EmailDeliveryOut.model_validate(item) for item in items],
-        page=page,
-        page_size=page_size,
-        total=total,
-    )
+    safe_items: List[EmailDeliveryOut] = []
+    for item in items:
+        out = EmailDeliveryOut.model_validate(item)
+        out.body_html = ""
+        out.body_text = ""
+        safe_items.append(out)
+    return EmailDeliveryHistoryOut(items=safe_items, page=page, page_size=page_size, total=total)
 
 
 @router.get("/users/search", response_model=EmailCenterUserSearchListOut)
@@ -675,6 +753,271 @@ async def send_email_user(
             body=payload.body,
             cta_label=payload.cta_label,
             cta_url=payload.cta_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return EmailDeliveryOut.model_validate(delivery)
+
+
+@router.post("/recipients/preview", response_model=RecipientsPreviewOut)
+async def recipients_preview(
+    payload: RecipientsPreviewIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> RecipientsPreviewOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    settings = get_settings()
+    if not settings.email_center_recipient_preview_enabled:
+        return RecipientsPreviewOut(
+            enabled=False,
+            audience_type=payload.audience_type,
+            total_matched=0,
+            returned_count=0,
+            items=[],
+            warnings=["Recipient preview is disabled by configuration"],
+        )
+    audience_type = (payload.audience_type or "").strip().lower()
+    data = await build_recipients_preview(
+        db,
+        audience_type=audience_type,
+        language=payload.language,
+        template_id=payload.template_id,
+        subject=payload.subject,
+        body=payload.body,
+        cta_label=payload.cta_label,
+        cta_url=payload.cta_url,
+        limit=payload.limit,
+    )
+    return RecipientsPreviewOut(
+        enabled=True,
+        audience_type=audience_type,
+        total_matched=data["total_matched"],
+        returned_count=data["returned_count"],
+        items=data["items"],
+        warnings=data["warnings"],
+    )
+
+
+@router.post("/recipients/preview-user-email", response_model=RecipientsPreviewUserEmailOut)
+async def recipients_preview_user_email(
+    payload: RecipientsPreviewUserEmailIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> RecipientsPreviewUserEmailOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    settings = get_settings()
+    if not settings.email_center_recipient_preview_enabled:
+        raise HTTPException(status_code=403, detail="Recipient preview disabled")
+    result = await build_preview_user_email(
+        db,
+        user_id=payload.user_id,
+        template_id=payload.template_id,
+        subject=payload.subject,
+        body=payload.body,
+        cta_label=payload.cta_label,
+        cta_url=payload.cta_url,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="User not found or missing content")
+    return RecipientsPreviewUserEmailOut(
+        user_id=payload.user_id,
+        email=result["email"],
+        detected_language=result["detected_language"],
+        subject=result["subject"],
+        preview_text=result["preview_text"],
+        body_html=result["body_html"],
+        body_text=result["body_text"],
+        cta_label=result["cta_label"],
+        cta_url=result["cta_url"],
+    )
+
+
+@router.get("/campaigns", response_model=EmailCampaignListOut)
+async def get_campaigns(
+    status_filter: str = Query(default="", alias="status"),
+    audience_type: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailCampaignListOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    if not _campaigns_enabled():
+        return EmailCampaignListOut(enabled=False, capability="disabled", items=[], limit=limit, offset=offset)
+    normalized_status = (status_filter or "").strip().lower()
+    normalized_audience = (audience_type or "").strip().lower()
+    if normalized_status:
+        validate_campaign_status(normalized_status)
+    if normalized_audience:
+        validate_campaign_audience_type(normalized_audience)
+    items = await list_email_campaigns(
+        db,
+        status_filter=normalized_status or None,
+        audience_type_filter=normalized_audience or None,
+        limit=limit,
+        offset=offset,
+    )
+    capability = "ready" if items else "no_campaigns"
+    return EmailCampaignListOut(
+        enabled=True,
+        capability=capability,
+        items=[EmailCampaignOut.model_validate(item) for item in items],
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/campaigns", response_model=EmailCampaignOut)
+async def create_campaign(
+    payload: EmailCampaignCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailCampaignOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_campaigns_enabled_for_write()
+    data = payload.model_dump(exclude_unset=True)
+    if not str(data.get("title") or "").strip():
+        raise HTTPException(status_code=422, detail="Campaign title is required")
+    try:
+        item = await create_email_campaign(db, admin_user=current_user, payload=data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return EmailCampaignOut.model_validate(item)
+
+
+@router.get("/campaigns/{campaign_id}", response_model=EmailCampaignOut)
+async def get_campaign(
+    campaign_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailCampaignOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    if not _campaigns_enabled():
+        raise HTTPException(status_code=403, detail="Campaign drafts disabled")
+    item = await get_email_campaign_by_id(db, campaign_id=campaign_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return EmailCampaignOut.model_validate(item)
+
+
+@router.patch("/campaigns/{campaign_id}", response_model=EmailCampaignOut)
+async def patch_campaign(
+    campaign_id: UUID,
+    payload: EmailCampaignUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailCampaignOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_campaigns_enabled_for_write()
+    item = await get_email_campaign_by_id(db, campaign_id=campaign_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    updates = payload.model_dump(exclude_unset=True)
+    try:
+        updated = await update_email_campaign(db, campaign=item, updates=updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return EmailCampaignOut.model_validate(updated)
+
+
+@router.delete("/campaigns/{campaign_id}", response_model=EmailCampaignOut)
+async def delete_campaign(
+    campaign_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailCampaignOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_campaigns_enabled_for_write()
+    item = await get_email_campaign_by_id(db, campaign_id=campaign_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    deleted = await soft_delete_email_campaign(db, campaign=item)
+    return EmailCampaignOut.model_validate(deleted)
+
+
+@router.post("/campaigns/{campaign_id}/duplicate", response_model=EmailCampaignOut)
+async def duplicate_campaign(
+    campaign_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailCampaignOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_campaigns_enabled_for_write()
+    item = await get_email_campaign_by_id(db, campaign_id=campaign_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    copied = await duplicate_email_campaign(db, campaign=item, admin_user=current_user)
+    return EmailCampaignOut.model_validate(copied)
+
+
+@router.post("/campaigns/{campaign_id}/recipients-preview", response_model=RecipientsPreviewOut)
+async def campaign_recipients_preview(
+    campaign_id: UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> RecipientsPreviewOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    if not _campaigns_enabled():
+        return RecipientsPreviewOut(
+            enabled=False,
+            audience_type="",
+            total_matched=0,
+            returned_count=0,
+            items=[],
+            warnings=["Campaign drafts disabled"],
+        )
+    item = await get_email_campaign_by_id(db, campaign_id=campaign_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    data = await build_campaign_recipients_preview(db, campaign=item, limit=limit)
+    return RecipientsPreviewOut(
+        enabled=True,
+        audience_type=item.audience_type,
+        total_matched=data["total_matched"],
+        returned_count=data["returned_count"],
+        items=data["items"],
+        warnings=data["warnings"],
+    )
+
+
+@router.post("/campaigns/{campaign_id}/send-test", response_model=EmailDeliveryOut)
+async def campaign_send_test(
+    campaign_id: UUID,
+    payload: CampaignSendTestIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailDeliveryOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_campaigns_enabled_for_write()
+    settings = get_settings()
+    if not settings.email_center_campaign_test_send_enabled:
+        raise HTTPException(status_code=403, detail="Campaign test send disabled")
+
+    language = (payload.language or "").strip().lower()
+    if language not in {"darija", "fr", "en"}:
+        raise HTTPException(status_code=422, detail="Invalid language")
+
+    campaign = await get_email_campaign_by_id(db, campaign_id=campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    try:
+        delivery = await send_campaign_test_email(
+            db,
+            admin_user=current_user,
+            campaign=campaign,
+            language=language,
+            requested_test_email=payload.test_email,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

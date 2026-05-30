@@ -12,12 +12,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.email_delivery import EmailDelivery
+from app.models.email_campaign import EmailCampaign
 from app.models.email_design_settings import EmailDesignSettings
 from app.models.email_template import EmailTemplate
+from app.models.envelope import Envelope
+from app.models.onboarding_v2_record import OnboardingV2Record
+from app.models.transaction import Transaction
 from app.models.user import User
 
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+SIMPLE_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 ALLOWED_TEMPLATE_LANGUAGES = {"darija", "fr", "en"}
+ALLOWED_AUDIENCE_TYPES = {
+    "all_users",
+    "incomplete_onboarding",
+    "no_transactions",
+    "no_envelopes",
+    "by_language",
+    "salary_today",
+    "salary_tomorrow",
+}
+ALLOWED_CAMPAIGN_LANGUAGE_MODES = {"auto", "darija", "fr", "en"}
+ALLOWED_CAMPAIGN_STATUS = {"draft", "ready", "archived"}
 ALLOWED_TEMPLATE_CATEGORIES = {
     "welcome",
     "onboarding_reminder",
@@ -665,3 +681,556 @@ async def seed_default_email_templates(db: AsyncSession, *, admin_user: User) ->
     if inserted > 0:
         await db.commit()
     return inserted
+
+
+def _is_preview_eligible_user(user: User, has_content: bool) -> Tuple[bool, str, Optional[str]]:
+    email_value = (getattr(user, "email", None) or "").strip()
+    if not email_value:
+        return False, "missing email", "missing_email"
+    if getattr(user, "deleted_at", None) is not None:
+        return False, "user deleted", "user_deleted"
+    status_value = (getattr(user, "status", "") or "").strip().lower()
+    if status_value and status_value != "active":
+        return False, "user disabled", "user_disabled"
+    if not SIMPLE_EMAIL_RE.match(email_value):
+        return False, "invalid email format", "invalid_email"
+    if not has_content:
+        return False, "content missing", "missing_content"
+    return True, "matched audience", None
+
+
+def _resolved_content_from_template_or_payload(
+    *,
+    template: Optional[EmailTemplate],
+    subject: Optional[str],
+    body: Optional[str],
+    cta_label: Optional[str],
+    cta_url: Optional[str],
+) -> Dict[str, str]:
+    resolved_subject = (subject or "").strip()
+    resolved_body = (body or "").strip()
+    resolved_cta_label = (cta_label or "").strip()
+    resolved_cta_url = (cta_url or "").strip()
+    if template is not None:
+        resolved_subject = resolved_subject or (template.subject or "").strip()
+        resolved_body = resolved_body or (template.body or "").strip()
+        resolved_cta_label = resolved_cta_label or (template.cta_label or "").strip()
+        resolved_cta_url = resolved_cta_url or (template.cta_url or "").strip()
+    return {
+        "subject": resolved_subject,
+        "body": resolved_body,
+        "cta_label": resolved_cta_label,
+        "cta_url": resolved_cta_url,
+        "preview_text": (resolved_body[:140] + "...") if len(resolved_body) > 140 else resolved_body,
+        "has_content": "1" if (resolved_subject and resolved_body) else "",
+    }
+
+
+async def _fetch_audience_users(
+    db: AsyncSession,
+    *,
+    audience_type: str,
+    warnings: List[str],
+) -> List[User]:
+    base_query = select(User).where(User.deleted_at.is_(None), User.status == "active")
+
+    if audience_type == "all_users" or audience_type == "by_language":
+        result = await db.execute(base_query.order_by(User.created_at.desc()))
+        return list(result.scalars().all())
+
+    if audience_type == "incomplete_onboarding":
+        subq = (
+            select(func.count(OnboardingV2Record.id))
+            .where(
+                OnboardingV2Record.user_id == User.id,
+                OnboardingV2Record.stage == "completed",
+            )
+            .scalar_subquery()
+        )
+        result = await db.execute(base_query.where(subq == 0).order_by(User.created_at.desc()))
+        return list(result.scalars().all())
+
+    if audience_type == "no_transactions":
+        subq = (
+            select(func.count(Transaction.id))
+            .where(Transaction.user_id == User.id)
+            .scalar_subquery()
+        )
+        result = await db.execute(base_query.where(subq == 0).order_by(User.created_at.desc()))
+        return list(result.scalars().all())
+
+    if audience_type == "no_envelopes":
+        subq = (
+            select(func.count(Envelope.id))
+            .where(Envelope.user_id == User.id)
+            .scalar_subquery()
+        )
+        result = await db.execute(base_query.where(subq == 0).order_by(User.created_at.desc()))
+        return list(result.scalars().all())
+
+    if audience_type in {"salary_today", "salary_tomorrow"}:
+        warnings.append("Salary date field not found or not supported yet")
+        return []
+
+    warnings.append("Unsupported audience_type: {0}".format(audience_type))
+    return []
+
+
+async def build_recipients_preview(
+    db: AsyncSession,
+    *,
+    audience_type: str,
+    language: Optional[str],
+    template_id,
+    subject: Optional[str],
+    body: Optional[str],
+    cta_label: Optional[str],
+    cta_url: Optional[str],
+    limit: int,
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    template = None
+    if template_id is not None:
+        template = await get_email_template_by_id(db, template_id)
+        if template is None:
+            warnings.append("Template not found; falling back to manual content fields")
+
+    content = _resolved_content_from_template_or_payload(
+        template=template,
+        subject=subject,
+        body=body,
+        cta_label=cta_label,
+        cta_url=cta_url,
+    )
+    has_content = bool(content["has_content"])
+    users = await _fetch_audience_users(db, audience_type=audience_type, warnings=warnings)
+    normalized_language = (language or "").strip().lower()
+    if normalized_language and normalized_language not in ALLOWED_TEMPLATE_LANGUAGES:
+        warnings.append("Unsupported language filter")
+        normalized_language = ""
+
+    items: List[Dict[str, Any]] = []
+    for user in users:
+        detected_language = detect_user_email_language(user)
+        if audience_type == "by_language" and normalized_language and detected_language != normalized_language:
+            continue
+        eligible, reason, skip_reason = _is_preview_eligible_user(user, has_content)
+        if template is not None and template.language != detected_language and eligible:
+            reason = "matched audience; template language fallback"
+        items.append(
+            {
+                "user_id": user.id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "display_name": build_user_display_name(user),
+                "detected_language": detected_language,
+                "eligible": eligible,
+                "reason": reason,
+                "skip_reason": skip_reason,
+            }
+        )
+
+    total_matched = len(items)
+    safe_limit = max(1, min(int(limit or 50), 200))
+    returned = items[:safe_limit]
+    return {
+        "audience_type": audience_type,
+        "total_matched": total_matched,
+        "returned_count": len(returned),
+        "items": returned,
+        "warnings": warnings,
+    }
+
+
+async def build_preview_user_email(
+    db: AsyncSession,
+    *,
+    user_id,
+    template_id,
+    subject: Optional[str],
+    body: Optional[str],
+    cta_label: Optional[str],
+    cta_url: Optional[str],
+) -> Optional[Dict[str, str]]:
+    user = await get_user_by_id_for_email_center(db, user_id=user_id)
+    if user is None or not (user.email or "").strip():
+        return None
+    template = None
+    if template_id is not None:
+        template = await get_email_template_by_id(db, template_id)
+    content = _resolved_content_from_template_or_payload(
+        template=template,
+        subject=subject,
+        body=body,
+        cta_label=cta_label,
+        cta_url=cta_url,
+    )
+    if not content["has_content"]:
+        return None
+    design = await get_or_create_design_settings(db)
+    body_html, body_text = render_email_html(
+        design=design,
+        subject=content["subject"],
+        body=content["body"],
+        cta_label=content["cta_label"],
+        cta_url=content["cta_url"],
+    )
+    return {
+        "user_id": str(user.id),
+        "email": user.email,
+        "detected_language": detect_user_email_language(user),
+        "subject": content["subject"],
+        "preview_text": content["preview_text"],
+        "body_html": body_html,
+        "body_text": body_text,
+        "cta_label": content["cta_label"],
+        "cta_url": content["cta_url"],
+    }
+
+
+def validate_campaign_audience_type(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in ALLOWED_AUDIENCE_TYPES:
+        raise ValueError("Invalid audience_type")
+    return normalized
+
+
+def validate_campaign_language_mode(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in ALLOWED_CAMPAIGN_LANGUAGE_MODES:
+        raise ValueError("Invalid language_mode")
+    return normalized
+
+
+def validate_campaign_status(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in ALLOWED_CAMPAIGN_STATUS:
+        raise ValueError("Invalid campaign status")
+    return normalized
+
+
+async def list_email_campaigns(
+    db: AsyncSession,
+    *,
+    status_filter: Optional[str],
+    audience_type_filter: Optional[str],
+    limit: int,
+    offset: int,
+) -> List[EmailCampaign]:
+    query = select(EmailCampaign).where(EmailCampaign.deleted_at.is_(None)).order_by(
+        EmailCampaign.created_at.desc()
+    )
+    if status_filter:
+        query = query.where(EmailCampaign.status == status_filter)
+    if audience_type_filter:
+        query = query.where(EmailCampaign.audience_type == audience_type_filter)
+    query = query.limit(max(1, min(limit, 200))).offset(max(0, offset))
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def get_email_campaign_by_id(
+    db: AsyncSession, *, campaign_id, include_deleted: bool = False
+) -> Optional[EmailCampaign]:
+    query = select(EmailCampaign).where(EmailCampaign.id == campaign_id)
+    if not include_deleted:
+        query = query.where(EmailCampaign.deleted_at.is_(None))
+    query = query.limit(1)
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+
+
+async def create_email_campaign(
+    db: AsyncSession,
+    *,
+    admin_user: User,
+    payload: Dict[str, Any],
+) -> EmailCampaign:
+    audience_type = validate_campaign_audience_type(str(payload.get("audience_type") or ""))
+    language_mode = validate_campaign_language_mode(str(payload.get("language_mode") or "auto"))
+    status_value = validate_campaign_status(str(payload.get("status") or "draft"))
+    item = EmailCampaign(
+        title=str(payload.get("title") or "").strip(),
+        type=(str(payload.get("type") or "manual").strip() or "manual"),
+        status=status_value,
+        audience_type=audience_type,
+        audience_filter_json=payload.get("audience_filter_json"),
+        language_mode=language_mode,
+        template_id=payload.get("template_id"),
+        subject_by_language_json=payload.get("subject_by_language_json"),
+        preview_by_language_json=payload.get("preview_by_language_json"),
+        body_by_language_json=payload.get("body_by_language_json"),
+        cta_label_by_language_json=payload.get("cta_label_by_language_json"),
+        cta_url=(str(payload.get("cta_url") or "").strip() or None),
+        design_settings_json=payload.get("design_settings_json"),
+        created_by_admin_id=admin_user.id,
+    )
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def update_email_campaign(
+    db: AsyncSession,
+    *,
+    campaign: EmailCampaign,
+    updates: Dict[str, Any],
+) -> EmailCampaign:
+    if campaign.status not in {"draft", "ready"}:
+        raise ValueError("Only draft/ready campaigns can be updated")
+    if "title" in updates and updates.get("title") is not None:
+        campaign.title = str(updates.get("title")).strip()
+    if "type" in updates and updates.get("type") is not None:
+        campaign.type = str(updates.get("type")).strip() or campaign.type
+    if "audience_type" in updates and updates.get("audience_type") is not None:
+        campaign.audience_type = validate_campaign_audience_type(str(updates.get("audience_type")))
+    if "audience_filter_json" in updates:
+        campaign.audience_filter_json = updates.get("audience_filter_json")
+    if "language_mode" in updates and updates.get("language_mode") is not None:
+        campaign.language_mode = validate_campaign_language_mode(str(updates.get("language_mode")))
+    if "template_id" in updates:
+        campaign.template_id = updates.get("template_id")
+    if "subject_by_language_json" in updates:
+        campaign.subject_by_language_json = updates.get("subject_by_language_json")
+    if "preview_by_language_json" in updates:
+        campaign.preview_by_language_json = updates.get("preview_by_language_json")
+    if "body_by_language_json" in updates:
+        campaign.body_by_language_json = updates.get("body_by_language_json")
+    if "cta_label_by_language_json" in updates:
+        campaign.cta_label_by_language_json = updates.get("cta_label_by_language_json")
+    if "cta_url" in updates:
+        campaign.cta_url = (str(updates.get("cta_url") or "").strip() or None)
+    if "design_settings_json" in updates:
+        campaign.design_settings_json = updates.get("design_settings_json")
+    if "estimated_recipient_count" in updates:
+        campaign.estimated_recipient_count = updates.get("estimated_recipient_count")
+    if "status" in updates and updates.get("status") is not None:
+        campaign.status = validate_campaign_status(str(updates.get("status")))
+    await db.commit()
+    await db.refresh(campaign)
+    return campaign
+
+
+async def soft_delete_email_campaign(db: AsyncSession, *, campaign: EmailCampaign) -> EmailCampaign:
+    campaign.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(campaign)
+    return campaign
+
+
+async def duplicate_email_campaign(
+    db: AsyncSession, *, campaign: EmailCampaign, admin_user: User
+) -> EmailCampaign:
+    copied = EmailCampaign(
+        title="Copy of {0}".format(campaign.title),
+        type=campaign.type,
+        status="draft",
+        audience_type=campaign.audience_type,
+        audience_filter_json=campaign.audience_filter_json,
+        language_mode=campaign.language_mode,
+        template_id=campaign.template_id,
+        subject_by_language_json=campaign.subject_by_language_json,
+        preview_by_language_json=campaign.preview_by_language_json,
+        body_by_language_json=campaign.body_by_language_json,
+        cta_label_by_language_json=campaign.cta_label_by_language_json,
+        cta_url=campaign.cta_url,
+        design_settings_json=campaign.design_settings_json,
+        estimated_recipient_count=campaign.estimated_recipient_count,
+        created_by_admin_id=admin_user.id,
+    )
+    db.add(copied)
+    await db.commit()
+    await db.refresh(copied)
+    return copied
+
+
+def _content_value_by_language(content: Optional[Dict[str, Any]], language: str) -> str:
+    if not isinstance(content, dict):
+        return ""
+    value = content.get(language)
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def _campaign_content_for_language(
+    *, campaign: EmailCampaign, language: str, template: Optional[EmailTemplate]
+) -> Dict[str, str]:
+    normalized_language = (language or "").strip().lower()
+    if normalized_language not in ALLOWED_TEMPLATE_LANGUAGES:
+        raise ValueError("Invalid language")
+
+    if campaign.language_mode in ALLOWED_TEMPLATE_LANGUAGES and campaign.language_mode != normalized_language:
+        raise ValueError("Campaign language mode is fixed to {0}".format(campaign.language_mode))
+
+    subject = _content_value_by_language(campaign.subject_by_language_json, normalized_language)
+    body = _content_value_by_language(campaign.body_by_language_json, normalized_language)
+    cta_label = _content_value_by_language(campaign.cta_label_by_language_json, normalized_language)
+    cta_url = (campaign.cta_url or "").strip()
+
+    if template is not None:
+        subject = subject or (template.subject or "").strip()
+        body = body or (template.body or "").strip()
+        cta_label = cta_label or (template.cta_label or "").strip()
+        cta_url = cta_url or (template.cta_url or "").strip()
+
+    if not subject or not body:
+        raise ValueError("Campaign has no content for this language.")
+
+    return {
+        "subject": subject,
+        "body": body,
+        "cta_label": cta_label,
+        "cta_url": cta_url,
+    }
+
+
+async def build_campaign_recipients_preview(
+    db: AsyncSession, *, campaign: EmailCampaign, limit: int
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    template = None
+    if campaign.template_id is not None:
+        template = await get_email_template_by_id(db, campaign.template_id)
+        if template is None:
+            warnings.append("Template not found; falling back to campaign content")
+
+    content_language = campaign.language_mode if campaign.language_mode in ALLOWED_TEMPLATE_LANGUAGES else "fr"
+    preview = await build_recipients_preview(
+        db,
+        audience_type=campaign.audience_type,
+        language=(
+            campaign.language_mode
+            if campaign.language_mode in ALLOWED_TEMPLATE_LANGUAGES
+            else (campaign.audience_filter_json or {}).get("language")
+        ),
+        template_id=campaign.template_id,
+        subject=_content_value_by_language(campaign.subject_by_language_json, content_language),
+        body=_content_value_by_language(campaign.body_by_language_json, content_language),
+        cta_label=_content_value_by_language(campaign.cta_label_by_language_json, content_language),
+        cta_url=campaign.cta_url,
+        limit=limit,
+    )
+    if campaign.language_mode == "auto":
+        langs = ["darija", "fr", "en"]
+        for lang in langs:
+            subject_value = _content_value_by_language(campaign.subject_by_language_json, lang)
+            body_value = _content_value_by_language(campaign.body_by_language_json, lang)
+            if not template and (not subject_value or not body_value):
+                warnings.append("Missing content for language {0}".format(lang))
+    preview["warnings"] = list(dict.fromkeys((preview.get("warnings") or []) + warnings))
+    return preview
+
+
+async def send_campaign_test_email(
+    db: AsyncSession,
+    *,
+    admin_user: User,
+    campaign: EmailCampaign,
+    language: str,
+    requested_test_email: Optional[str],
+) -> EmailDelivery:
+    app_settings = get_settings()
+    provider = (app_settings.mail_provider or "mailtrap").strip().lower()
+    configured_test_recipient = (app_settings.email_center_test_recipient_email or "").strip().lower()
+    if not configured_test_recipient:
+        raise ValueError("EMAIL_CENTER_TEST_RECIPIENT_EMAIL is required.")
+    requested = (requested_test_email or "").strip().lower()
+    if requested and requested != configured_test_recipient:
+        raise ValueError("test_email must match EMAIL_CENTER_TEST_RECIPIENT_EMAIL")
+
+    template = None
+    if campaign.template_id is not None:
+        template = await get_email_template_by_id(db, campaign.template_id)
+    content = _campaign_content_for_language(campaign=campaign, language=language, template=template)
+    # Safe placeholder replacement for test-only campaign rendering.
+    body_value = content["body"].replace("{first_name}", "Test")
+
+    design = await get_or_create_design_settings(db)
+    body_html, body_text = render_email_html(
+        design=design,
+        subject=content["subject"],
+        body=body_value,
+        cta_label=content["cta_label"],
+        cta_url=content["cta_url"],
+    )
+
+    note_value = "campaign_test:{0}".format(str(campaign.id))
+    if app_settings.email_center_kill_switch:
+        return await _create_delivery(
+            db,
+            email=configured_test_recipient,
+            original_recipient_email="campaign_test",
+            recipient_user_id=None,
+            subject=content["subject"],
+            language=language,
+            body_html=body_html,
+            body_text=body_text,
+            provider=provider,
+            created_by_admin_id=admin_user.id,
+            note=note_value,
+            status="skipped",
+            error_message="Email center kill switch is active.",
+        )
+
+    delivery = await _create_delivery(
+        db,
+        email=configured_test_recipient,
+        original_recipient_email="campaign_test",
+        recipient_user_id=None,
+        subject=content["subject"],
+        language=language,
+        body_html=body_html,
+        body_text=body_text,
+        provider=provider,
+        created_by_admin_id=admin_user.id,
+        note=note_value,
+        status="pending",
+    )
+
+    if provider != "mailtrap":
+        delivery.status = "failed"
+        delivery.error_message = "Unsupported mail provider."
+        delivery.failed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery
+
+    api_token = (app_settings.mailtrap_api_token or "").strip()
+    if not api_token:
+        delivery.status = "failed"
+        delivery.error_message = "MAILTRAP_API_TOKEN is missing."
+        delivery.failed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery
+
+    payload: Dict[str, Any] = {
+        "from": {"email": app_settings.mail_from, "name": design.brand_name or "7sabek"},
+        "to": [{"email": configured_test_recipient}],
+        "subject": content["subject"],
+        "html": body_html,
+        "text": body_text,
+        "category": "Campaign Test",
+    }
+    headers = {"Authorization": "Bearer {0}".format(api_token), "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(app_settings.mailtrap_api_base, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json() if response.content else {}
+        delivery.status = "sent"
+        delivery.sent_at = datetime.now(timezone.utc)
+        delivery.provider_message_id = str(
+            data.get("message_ids", [None])[0] or data.get("id") or ""
+        ) or None
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery
+    except Exception as exc:  # noqa: BLE001
+        delivery.status = "failed"
+        delivery.error_message = "Send failed: {0}".format(type(exc).__name__)
+        delivery.failed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(delivery)
+        return delivery

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -142,6 +142,9 @@ class EmailCenterSystemStatusFlagsOut(BaseModel):
     templates_enabled: bool
     allow_open_tracking: bool
     allow_click_tracking: bool
+    recipient_preview_enabled: bool
+    campaigns_enabled: bool
+    campaign_test_send_enabled: bool
 
 
 class EmailCenterAISuggestIn(BaseModel):
@@ -237,6 +240,9 @@ class EmailCenterSystemStatusCapabilitiesOut(BaseModel):
     salary_reminders: bool
     ai_suggestions: bool
     templates: bool
+    recipient_preview: str
+    campaigns: str
+    campaign_test_send: str
 
 
 class EmailCenterSystemStatusAIOut(BaseModel):
@@ -270,6 +276,12 @@ class EmailCenterSystemStatusStatsOut(BaseModel):
     latest_delivery_at: Optional[datetime] = None
 
 
+class EmailCenterSystemStatusCampaignsOut(BaseModel):
+    campaigns_enabled: bool
+    campaign_drafts_count: Optional[int] = None
+    campaign_capability: str
+
+
 class EmailCenterSystemStatusOut(BaseModel):
     enabled: bool
     mode: str
@@ -278,7 +290,131 @@ class EmailCenterSystemStatusOut(BaseModel):
     mail_provider: EmailCenterSystemStatusMailProviderOut
     ai: EmailCenterSystemStatusAIOut
     templates: EmailCenterSystemStatusTemplatesOut
+    campaigns: EmailCenterSystemStatusCampaignsOut
     database: EmailCenterSystemStatusDatabaseOut
     capabilities: EmailCenterSystemStatusCapabilitiesOut
     safety: EmailCenterSystemStatusSafetyOut
     stats: EmailCenterSystemStatusStatsOut
+
+
+class RecipientsPreviewIn(BaseModel):
+    audience_type: str = Field(max_length=40)
+    language: Optional[str] = Field(default=None, max_length=16)
+    template_id: Optional[UUID] = None
+    subject: Optional[str] = Field(default=None, max_length=300)
+    body: Optional[str] = Field(default=None, max_length=20000)
+    cta_label: Optional[str] = Field(default=None, max_length=120)
+    cta_url: Optional[str] = Field(default=None, max_length=500)
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class RecipientsPreviewItemOut(BaseModel):
+    user_id: UUID
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: str
+    detected_language: str
+    eligible: bool
+    reason: str
+    skip_reason: Optional[str] = None
+
+
+class RecipientsPreviewOut(BaseModel):
+    enabled: bool
+    audience_type: str
+    total_matched: int
+    returned_count: int
+    items: List[RecipientsPreviewItemOut]
+    warnings: List[str]
+
+
+class RecipientsPreviewUserEmailIn(BaseModel):
+    user_id: UUID
+    template_id: Optional[UUID] = None
+    subject: Optional[str] = Field(default=None, max_length=300)
+    body: Optional[str] = Field(default=None, max_length=20000)
+    cta_label: Optional[str] = Field(default=None, max_length=120)
+    cta_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class RecipientsPreviewUserEmailOut(BaseModel):
+    user_id: UUID
+    email: str
+    detected_language: str
+    subject: str
+    preview_text: str
+    body_html: str
+    body_text: str
+    cta_label: str
+    cta_url: str
+
+
+class CampaignSendTestIn(BaseModel):
+    language: str = Field(max_length=16)
+    test_email: Optional[str] = Field(default=None, max_length=255)
+
+
+class EmailCampaignCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    type: str = Field(default="manual", max_length=40)
+    audience_type: str = Field(max_length=40)
+    audience_filter_json: Optional[Dict[str, Any]] = None
+    language_mode: str = Field(default="auto", max_length=16)
+    template_id: Optional[UUID] = None
+    subject_by_language_json: Optional[Dict[str, Any]] = None
+    preview_by_language_json: Optional[Dict[str, Any]] = None
+    body_by_language_json: Optional[Dict[str, Any]] = None
+    cta_label_by_language_json: Optional[Dict[str, Any]] = None
+    cta_url: Optional[str] = Field(default=None, max_length=500)
+    design_settings_json: Optional[Dict[str, Any]] = None
+    status: Optional[str] = Field(default="draft", max_length=20)
+
+
+class EmailCampaignUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    type: Optional[str] = Field(default=None, max_length=40)
+    audience_type: Optional[str] = Field(default=None, max_length=40)
+    audience_filter_json: Optional[Dict[str, Any]] = None
+    language_mode: Optional[str] = Field(default=None, max_length=16)
+    template_id: Optional[UUID] = None
+    subject_by_language_json: Optional[Dict[str, Any]] = None
+    preview_by_language_json: Optional[Dict[str, Any]] = None
+    body_by_language_json: Optional[Dict[str, Any]] = None
+    cta_label_by_language_json: Optional[Dict[str, Any]] = None
+    cta_url: Optional[str] = Field(default=None, max_length=500)
+    design_settings_json: Optional[Dict[str, Any]] = None
+    estimated_recipient_count: Optional[int] = None
+    status: Optional[str] = Field(default=None, max_length=20)
+
+
+class EmailCampaignOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+    type: str
+    status: str
+    audience_type: str
+    audience_filter_json: Optional[Dict[str, Any]] = None
+    language_mode: str
+    template_id: Optional[UUID] = None
+    subject_by_language_json: Optional[Dict[str, Any]] = None
+    preview_by_language_json: Optional[Dict[str, Any]] = None
+    body_by_language_json: Optional[Dict[str, Any]] = None
+    cta_label_by_language_json: Optional[Dict[str, Any]] = None
+    cta_url: Optional[str] = None
+    design_settings_json: Optional[Dict[str, Any]] = None
+    estimated_recipient_count: Optional[int] = None
+    created_by_admin_id: Optional[UUID] = None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
+
+
+class EmailCampaignListOut(BaseModel):
+    enabled: bool
+    capability: str
+    items: List[EmailCampaignOut]
+    limit: int
+    offset: int
