@@ -18,6 +18,7 @@ from app.models import (
     EmailDelivery,
     EmailDesignSettings,
     EmailSuppression,
+    RegistrationLead,
     Envelope,
     OnboardingV2Record,
     Transaction,
@@ -131,6 +132,7 @@ TEMPLATE_ALLOWED_CATEGORIES = {
     "monthly_checkin",
     "product_update",
     "maintenance",
+    "registration_reminder",
     "custom",
 }
 
@@ -270,6 +272,9 @@ async def get_email_center_system_status(
     suppression_count = None
     active_suppression_count = None
     suppression_migration_required = False
+    registration_leads_count = None
+    registration_leads_email_captured_count = None
+    registration_leads_capability = "disabled"
     try:
         suppression_count = int((await db.execute(select(func.count(EmailSuppression.id)))).scalar_one() or 0)
         active_suppression_count = int(
@@ -277,6 +282,20 @@ async def get_email_center_system_status(
         )
     except Exception:
         suppression_migration_required = True
+    if settings.registration_leads_enabled:
+        try:
+            registration_leads_count = int((await db.execute(select(func.count(RegistrationLead.id)))).scalar_one() or 0)
+            registration_leads_email_captured_count = int(
+                (
+                    await db.execute(
+                        select(func.count(RegistrationLead.id)).where(RegistrationLead.status == "email_captured")
+                    )
+                ).scalar_one()
+                or 0
+            )
+            registration_leads_capability = "ready"
+        except Exception:
+            registration_leads_capability = "migration_required"
 
     mode_value = (settings.email_center_mode or "").strip().lower()
     test_recipient_configured = bool((settings.email_center_test_recipient_email or "").strip())
@@ -410,6 +429,7 @@ async def get_email_center_system_status(
                 if settings.email_center_kill_switch
                 else ("ready" if settings.email_center_delivery_queue_enabled else "disabled")
             ),
+            registration_leads=registration_leads_capability,
         ),
         safety=EmailCenterSystemStatusSafetyOut(
             bulk_send_blocked=not settings.email_center_allow_bulk_send,
@@ -432,6 +452,8 @@ async def get_email_center_system_status(
             pending_deliveries_count=pending_count,
             retry_deliveries_count=retry_count,
             latest_delivery_at=latest_delivery_at,
+            registration_leads_count=registration_leads_count,
+            registration_leads_email_captured_count=registration_leads_email_captured_count,
         ),
     )
 
@@ -1270,6 +1292,8 @@ async def send_campaign_bulk_queue(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.status != "ready":
         raise HTTPException(status_code=422, detail="Campaign must be ready")
+    if campaign.audience_type == "registration_leads_email_captured":
+        raise HTTPException(status_code=403, detail="Lead audience bulk send disabled")
     if settings.email_center_bulk_require_dry_run and campaign.last_dry_run_at is None:
         raise HTTPException(status_code=422, detail="Dry run is required")
     if settings.email_center_bulk_require_test_send and campaign.last_test_sent_at is None:

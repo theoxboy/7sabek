@@ -25,6 +25,7 @@ from app.api.routes.users import router as users_router
 from app.api.routes.advisor import router as advisor_router
 from app.api.routes.email_center import router as email_center_router
 from app.api.routes.email_public import router as email_public_router
+from app.api.routes.registration_leads import router as registration_leads_router
 
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
@@ -52,3 +53,4 @@ api_router.include_router(reports_router, tags=["reports"])
 api_router.include_router(advisor_router, tags=["advisor"])
 api_router.include_router(email_center_router, tags=["email-center"])
 api_router.include_router(email_public_router, tags=["email-public"])
+api_router.include_router(registration_leads_router, tags=["registration-leads"])

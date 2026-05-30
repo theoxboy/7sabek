@@ -30,6 +30,9 @@ class EmailDelivery(Base):
     campaign_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("email_campaigns.id", ondelete="SET NULL"), nullable=True
     )
+    registration_lead_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("registration_leads.id", ondelete="SET NULL"), nullable=True
+    )
     category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     queued_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     next_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

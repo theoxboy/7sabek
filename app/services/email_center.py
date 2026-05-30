@@ -23,6 +23,7 @@ from app.models.email_template import EmailTemplate
 from app.models.email_preference import EmailPreference
 from app.models.email_unsubscribe import EmailUnsubscribe
 from app.models.email_suppression import EmailSuppression
+from app.models.registration_lead import RegistrationLead
 from app.models.envelope import Envelope
 from app.models.onboarding_v2_record import OnboardingV2Record
 from app.models.transaction import Transaction
@@ -41,6 +42,7 @@ ALLOWED_AUDIENCE_TYPES = {
     "by_language",
     "salary_today",
     "salary_tomorrow",
+    "registration_leads_email_captured",
 }
 ALLOWED_CAMPAIGN_LANGUAGE_MODES = {"auto", "darija", "fr", "en"}
 ALLOWED_CAMPAIGN_STATUS = {"draft", "ready", "queued", "archived"}
@@ -54,6 +56,7 @@ ALLOWED_TEMPLATE_CATEGORIES = {
     "monthly_checkin",
     "product_update",
     "maintenance",
+    "registration_reminder",
     "custom",
 }
 UNSUBSCRIBE_ALLOWED_CATEGORIES = {"salary_reminders", "tips", "product_updates", "marketing"}
@@ -823,6 +826,7 @@ def _default_template_rows() -> List[Dict[str, str]]:
         ("envelope_setup", "Envelope Setup"),
         ("passkey_reminder", "Passkey Reminder"),
         ("monthly_checkin", "Monthly Check-in"),
+        ("registration_reminder", "Registration Reminder"),
         ("custom", "Custom"),
     ]
     rows: List[Dict[str, str]] = []
@@ -834,10 +838,10 @@ def _default_template_rows() -> List[Dict[str, str]]:
                     "name": "{0} (Darija)".format(label),
                     "category": category,
                     "language": "darija",
-                    "subject": "رسالة {0}".format(label.lower().replace("_", " ")),
-                    "preview_text": "رسالة قصيرة وواضحة.",
-                    "body": "سلام! بغينا نذكروك بخطوة بسيطة فـ 7sabek باش تبقى متابع الأمور المالية ديالك بشكل منظم.",
-                    "cta_label": "فتح 7sabek",
+                    "subject": "كمّل حسابك فـ 7sabek" if category == "registration_reminder" else "رسالة {0}".format(label.lower().replace("_", " ")),
+                    "preview_text": "كمل التسجيل ديالك غير فدقيقة." if category == "registration_reminder" else "رسالة قصيرة وواضحة.",
+                    "body": "السلام {first_name} 👋\nبديتي تصاوب حسابك فـ 7sabek وباقي غير شوية باش تكمل. رجع وكمل التسجيل فدقيقة." if category == "registration_reminder" else "سلام! بغينا نذكروك بخطوة بسيطة فـ 7sabek باش تبقى متابع الأمور المالية ديالك بشكل منظم.",
+                    "cta_label": "كمل التسجيل" if category == "registration_reminder" else "فتح 7sabek",
                     "cta_url": "",
                 },
                 {
@@ -845,10 +849,10 @@ def _default_template_rows() -> List[Dict[str, str]]:
                     "name": "{0} (FR)".format(label),
                     "category": category,
                     "language": "fr",
-                    "subject": "{0} - 7sabek".format(label),
-                    "preview_text": "Message court et clair.",
-                    "body": "Bonjour, voici un rappel simple pour vous aider à avancer sereinement sur 7sabek.",
-                    "cta_label": "Ouvrir 7sabek",
+                    "subject": "Terminez votre compte 7sabek" if category == "registration_reminder" else "{0} - 7sabek".format(label),
+                    "preview_text": "Finalisez votre inscription." if category == "registration_reminder" else "Message court et clair.",
+                    "body": "Bonjour {first_name},\nvous avez commencé votre inscription. Il ne reste que quelques étapes pour terminer." if category == "registration_reminder" else "Bonjour, voici un rappel simple pour vous aider à avancer sereinement sur 7sabek.",
+                    "cta_label": "Continuer l’inscription" if category == "registration_reminder" else "Ouvrir 7sabek",
                     "cta_url": "",
                 },
                 {
@@ -856,10 +860,10 @@ def _default_template_rows() -> List[Dict[str, str]]:
                     "name": "{0} (EN)".format(label),
                     "category": category,
                     "language": "en",
-                    "subject": "{0} - 7sabek".format(label),
-                    "preview_text": "Short and clear message.",
-                    "body": "Hi, here is a quick reminder to help you stay on track in 7sabek.",
-                    "cta_label": "Open 7sabek",
+                    "subject": "Finish setting up your 7sabek account" if category == "registration_reminder" else "{0} - 7sabek".format(label),
+                    "preview_text": "Finish your signup in one minute." if category == "registration_reminder" else "Short and clear message.",
+                    "body": "Hi {first_name},\nyou started creating your account. You can finish setup in just a minute." if category == "registration_reminder" else "Hi, here is a quick reminder to help you stay on track in 7sabek.",
+                    "cta_label": "Continue signup" if category == "registration_reminder" else "Open 7sabek",
                     "cta_url": "",
                 },
             ]
@@ -1013,6 +1017,55 @@ async def build_recipients_preview(
         cta_url=cta_url,
     )
     has_content = bool(content["has_content"])
+    if audience_type == "registration_leads_email_captured":
+        query = (
+            select(RegistrationLead)
+            .where(
+                RegistrationLead.normalized_email.is_not(None),
+                RegistrationLead.converted_user_id.is_(None),
+                RegistrationLead.status.in_(["partial", "email_captured"]),
+            )
+            .order_by(RegistrationLead.last_seen_at.desc())
+        )
+        lead_result = await db.execute(query)
+        leads = list(lead_result.scalars().all())
+        items = []
+        for lead in leads:
+            lead_email = (lead.email or "").strip().lower()
+            if not lead_email or not SIMPLE_EMAIL_RE.match(lead_email):
+                continue
+            suppressed = await is_email_suppressed(
+                db,
+                email=lead_email,
+                category="marketing",
+                user_id=None,
+            )
+            items.append(
+                {
+                    "user_id": None,
+                    "lead_id": lead.id,
+                    "recipient_type": "registration_lead",
+                    "email": lead_email,
+                    "first_name": lead.first_name,
+                    "last_name": lead.last_name,
+                    "display_name": build_user_display_name(lead),
+                    "detected_language": (lead.language or "darija").strip().lower() or "darija",
+                    "eligible": (not suppressed) and has_content,
+                    "reason": "incomplete_registration" if not suppressed else "suppressed",
+                    "skip_reason": "suppressed" if suppressed else (None if has_content else "missing_content"),
+                }
+            )
+        total_matched = len(items)
+        safe_limit = max(1, min(int(limit or 50), 200))
+        returned = items[:safe_limit]
+        return {
+            "audience_type": audience_type,
+            "total_matched": total_matched,
+            "returned_count": len(returned),
+            "items": returned,
+            "warnings": warnings,
+        }
+
     users = await _fetch_audience_users(db, audience_type=audience_type, warnings=warnings)
     normalized_language = (language or "").strip().lower()
     if normalized_language and normalized_language not in ALLOWED_TEMPLATE_LANGUAGES:
@@ -1048,6 +1101,8 @@ async def build_recipients_preview(
         items.append(
             {
                 "user_id": user.id,
+                "lead_id": None,
+                "recipient_type": "user",
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,

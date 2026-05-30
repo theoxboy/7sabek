@@ -252,6 +252,7 @@ class EmailCenterSystemStatusCapabilitiesOut(BaseModel):
     suppression: str
     bulk_send_capability: str
     queue: str
+    registration_leads: str
 
 
 class EmailCenterSystemStatusAIOut(BaseModel):
@@ -288,6 +289,8 @@ class EmailCenterSystemStatusStatsOut(BaseModel):
     pending_deliveries_count: int = 0
     retry_deliveries_count: int = 0
     latest_delivery_at: Optional[datetime] = None
+    registration_leads_count: Optional[int] = None
+    registration_leads_email_captured_count: Optional[int] = None
 
 
 class EmailCenterSystemStatusCampaignsOut(BaseModel):
@@ -342,12 +345,14 @@ class RecipientsPreviewIn(BaseModel):
 
 
 class RecipientsPreviewItemOut(BaseModel):
-    user_id: UUID
+    user_id: Optional[UUID] = None
+    lead_id: Optional[UUID] = None
     email: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     display_name: str
     detected_language: str
+    recipient_type: str = "user"
     eligible: bool
     reason: str
     skip_reason: Optional[str] = None

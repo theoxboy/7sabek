@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     email_center_queue_retry_delay_minutes: int = 30
     email_center_queue_rate_limit_per_minute: int = 50
     email_center_test_recipient_email: str = ""
+    registration_leads_enabled: bool = False
+    registration_leads_capture_email_on_blur: bool = True
+    registration_leads_retention_days: int = 90
 
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="", case_sensitive=False

@@ -45,6 +45,7 @@ from app.models.email_template import EmailTemplate
 from app.models.email_preference import EmailPreference
 from app.models.email_unsubscribe import EmailUnsubscribe
 from app.models.email_suppression import EmailSuppression
+from app.models.registration_lead import RegistrationLead
 
 __all__ = [
     "Category",
@@ -94,4 +95,5 @@ __all__ = [
     "EmailPreference",
     "EmailUnsubscribe",
     "EmailSuppression",
+    "RegistrationLead",
 ]

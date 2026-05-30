@@ -4,6 +4,8 @@ from datetime import date, timedelta, datetime, timezone
 from hashlib import sha256
 import logging
 import secrets
+from typing import Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
@@ -52,6 +54,7 @@ from app.models import (
     SuperadminSession,
     User,
     WebLoginToken,
+    RegistrationLead,
 )
 from app.services.password_reset_mailer import send_password_reset_email
 from app.services.onboarding_v2_apply import (
@@ -89,6 +92,7 @@ from app.schemas.auth import (
     WebLoginTokenOut,
     WebLoginExchangeIn,
 )
+from app.schemas.registration_lead import RegistrationLeadOut, RegistrationLeadUpsertIn
 
 router = APIRouter(prefix="/auth")
 logger = logging.getLogger("app.auth")
@@ -98,10 +102,62 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def _safe_normalize_optional_email(value: str) -> str:
+    normalized = _normalize_email(value or "")
+    return normalized or ""
+
+
+async def _mark_registration_lead_converted(
+    db: AsyncSession,
+    *,
+    lead_id: Optional[UUID],
+    normalized_email: str,
+    user_id: UUID,
+) -> None:
+    normalized = _safe_normalize_optional_email(normalized_email)
+    if not normalized:
+        return
+    lead: Optional[RegistrationLead] = None
+    if lead_id is not None:
+        lead_result = await db.execute(select(RegistrationLead).where(RegistrationLead.id == lead_id).limit(1))
+        candidate = lead_result.scalar_one_or_none()
+        if candidate is not None:
+            candidate_email = (candidate.normalized_email or "").strip().lower()
+            if (
+                candidate.status not in {"converted", "dismissed", "blocked"}
+                and (not candidate_email or candidate_email == normalized)
+            ):
+                lead = candidate
+    if lead is None:
+        result = await db.execute(
+            select(RegistrationLead)
+            .where(
+                RegistrationLead.normalized_email == normalized,
+                RegistrationLead.status.in_(["partial", "email_captured"]),
+            )
+            .order_by(RegistrationLead.created_at.desc())
+            .limit(1)
+        )
+        lead = result.scalar_one_or_none()
+    if lead is None:
+        return
+    now = datetime.now(timezone.utc)
+    lead.status = "converted"
+    lead.converted_user_id = user_id
+    lead.converted_at = now
+    lead.last_seen_at = now
+    lead.updated_at = now
+
+
 def _email_domain(value: str) -> str:
     if "@" not in value:
         return "unknown"
     return value.rsplit("@", 1)[-1].lower()
+
+
+def _normalize_person_name(value: str) -> str:
+    # Collapse repeated spaces and compare in case-insensitive mode.
+    return " ".join(value.strip().split()).casefold()
 
 
 def _build_register_onboarding_record(payload: RegisterIn, user_id) -> OnboardingV2Record:
@@ -403,6 +459,90 @@ async def _end_superadmin_session_from_request(
     await db.commit()
 
 
+@router.post("/register/lead", response_model=RegistrationLeadOut)
+async def capture_register_lead(
+    payload: RegistrationLeadUpsertIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> RegistrationLeadOut:
+    settings = get_settings()
+    if not settings.registration_leads_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    platform_settings = await get_platform_settings(db)
+    await enforce_rate_limit(
+        db,
+        request,
+        "register_lead",
+        platform_settings.rate_limit_register_max,
+        platform_settings.rate_limit_register_window_minutes * 60,
+    )
+
+    normalized_email = _safe_normalize_optional_email(payload.email or "")
+    lead = None
+    lead_from_id = None
+    if payload.lead_id is not None:
+        lead_result = await db.execute(select(RegistrationLead).where(RegistrationLead.id == payload.lead_id))
+        lead_from_id = lead_result.scalar_one_or_none()
+    if lead_from_id is not None:
+        existing_status = (lead_from_id.status or "").strip().lower()
+        existing_email = (lead_from_id.normalized_email or "").strip().lower()
+        allow_update = existing_status not in {"converted", "dismissed", "blocked"}
+        if allow_update:
+            if existing_email and normalized_email and normalized_email != existing_email:
+                allow_update = False
+            if allow_update:
+                lead = lead_from_id
+    if lead is None and payload.lead_id is None and normalized_email:
+        lead_result = await db.execute(
+            select(RegistrationLead)
+            .where(
+                RegistrationLead.normalized_email == normalized_email,
+                RegistrationLead.status.in_(["partial", "email_captured"]),
+            )
+            .order_by(RegistrationLead.created_at.desc())
+            .limit(1)
+        )
+        lead = lead_result.scalar_one_or_none()
+    if lead is None:
+        lead = RegistrationLead(source="register")
+        db.add(lead)
+
+    if payload.first_name is not None:
+        lead.first_name = payload.first_name.strip() or None
+    if payload.last_name is not None:
+        lead.last_name = payload.last_name.strip() or None
+    if payload.phone is not None:
+        lead.phone = payload.phone.strip() or None
+    if payload.birth_date is not None:
+        lead.birth_date = payload.birth_date
+    if payload.country is not None:
+        lead.country = payload.country.strip() or None
+    if payload.city is not None:
+        lead.city = payload.city.strip() or None
+    if payload.language is not None:
+        lead.language = payload.language.strip().lower() or None
+    if normalized_email:
+        lead.email = normalized_email
+        lead.normalized_email = normalized_email
+    if payload.current_step is not None:
+        lead.current_step = payload.current_step
+        previous_highest = lead.highest_step_reached or 0
+        lead.highest_step_reached = max(previous_highest, payload.current_step)
+    lead.last_seen_at = datetime.now(timezone.utc)
+    lead.status = "email_captured" if (lead.normalized_email or "").strip() else "partial"
+
+    # Do not reveal registered email existence. Mark internally only.
+    if normalized_email:
+        existing_user = await db.execute(select(User.id).where(func.lower(User.email) == normalized_email))
+        if existing_user.scalar_one_or_none() is not None and lead.status != "converted":
+            lead.status = "blocked"
+
+    await db.commit()
+    await db.refresh(lead)
+    public_status = "email_captured" if (lead.normalized_email or "").strip() else "partial"
+    return RegistrationLeadOut(lead_id=lead.id, status=public_status)
+
+
 @router.post("/register", response_model=AuthOut, status_code=status.HTTP_201_CREATED)
 async def register(
     payload: RegisterIn,
@@ -564,6 +704,13 @@ async def register(
             onboarding_record.stage = "completed"
 
         await db.commit()
+        await _mark_registration_lead_converted(
+            db,
+            lead_id=payload.lead_id,
+            normalized_email=normalized_email,
+            user_id=existing_user.id,
+        )
+        await db.commit()
         session_token = await _create_or_reuse_account_session(
             db,
             request,
@@ -636,6 +783,13 @@ async def register(
             workflow_stage="completed",
         )
         onboarding_record.stage = "completed"
+    await db.commit()
+    await _mark_registration_lead_converted(
+        db,
+        lead_id=payload.lead_id,
+        normalized_email=normalized_email,
+        user_id=user.id,
+    )
     await db.commit()
     await db.refresh(user)
 
@@ -1041,15 +1195,29 @@ async def confirm_password_reset(
     if user.role == "superadmin":
         settings = get_settings()
         provided_code = (payload.superadmin_code or "").strip()
-        provided_first_name = (payload.superadmin_first_name or "").strip().upper()
+        provided_first_name = _normalize_person_name(payload.superadmin_first_name or "")
         expected_code = (settings.superadmin_password_reset_code or "").strip()
-        expected_first_name = (
+        expected_first_name = _normalize_person_name(
             settings.superadmin_password_reset_first_name or ""
-        ).strip().upper()
-        if provided_code != expected_code or provided_first_name != expected_first_name:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Superadmin verification failed.",
+        )
+
+        if expected_code and expected_first_name:
+            if provided_code != expected_code or provided_first_name != expected_first_name:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Superadmin verification failed.",
+                )
+        elif expected_code or expected_first_name:
+            code_ok = not expected_code or provided_code == expected_code
+            first_name_ok = not expected_first_name or provided_first_name == expected_first_name
+            if not code_ok or not first_name_ok:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Superadmin verification failed.",
+                )
+        else:
+            logger.warning(
+                "Superadmin password reset verification skipped: SUPERADMIN_PASSWORD_RESET_CODE and SUPERADMIN_PASSWORD_RESET_FIRST_NAME are not configured."
             )
 
     user.password_hash = hash_password(payload.new_password)
