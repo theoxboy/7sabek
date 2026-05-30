@@ -13,9 +13,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.email_delivery import EmailDelivery
 from app.models.email_design_settings import EmailDesignSettings
+from app.models.email_template import EmailTemplate
 from app.models.user import User
 
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+ALLOWED_TEMPLATE_LANGUAGES = {"darija", "fr", "en"}
+ALLOWED_TEMPLATE_CATEGORIES = {
+    "welcome",
+    "onboarding_reminder",
+    "salary_reminder",
+    "first_transaction",
+    "envelope_setup",
+    "passkey_reminder",
+    "monthly_checkin",
+    "product_update",
+    "maintenance",
+    "custom",
+}
 
 
 def _safe_color(value: str, fallback: str) -> str:
@@ -454,3 +468,200 @@ async def get_delivery_history(
     result = await db.execute(query)
     items = list(result.scalars().all())
     return items, total
+
+
+def _normalize_template_language(value: str) -> str:
+    lang = (value or "fr").strip().lower()
+    return lang if lang in ALLOWED_TEMPLATE_LANGUAGES else "fr"
+
+
+def _normalize_template_category(value: str) -> str:
+    category = (value or "custom").strip().lower()
+    return category if category in ALLOWED_TEMPLATE_CATEGORIES else "custom"
+
+
+async def list_email_templates(
+    db: AsyncSession,
+    *,
+    language: Optional[str] = None,
+    category: Optional[str] = None,
+    active_only: bool = False,
+) -> List[EmailTemplate]:
+    query = select(EmailTemplate).order_by(EmailTemplate.created_at.desc())
+    if language:
+        query = query.where(EmailTemplate.language == _normalize_template_language(language))
+    if category:
+        query = query.where(EmailTemplate.category == _normalize_template_category(category))
+    if active_only:
+        query = query.where(EmailTemplate.is_active.is_(True))
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def create_email_template(
+    db: AsyncSession,
+    *,
+    admin_user: User,
+    key: Optional[str],
+    name: str,
+    category: str,
+    language: str,
+    subject: str,
+    preview_text: Optional[str],
+    body: str,
+    cta_label: Optional[str],
+    cta_url: Optional[str],
+    is_active: bool,
+) -> EmailTemplate:
+    clean_key = (key or "").strip() or None
+    if clean_key:
+        exists = await db.execute(select(EmailTemplate.id).where(EmailTemplate.key == clean_key))
+        if exists.scalar_one_or_none() is not None:
+            raise ValueError("Template key already exists")
+
+    item = EmailTemplate(
+        key=clean_key,
+        name=name.strip(),
+        category=_normalize_template_category(category),
+        language=_normalize_template_language(language),
+        subject=subject.strip(),
+        preview_text=(preview_text or "").strip() or None,
+        body=body.strip(),
+        cta_label=(cta_label or "").strip() or None,
+        cta_url=(cta_url or "").strip() or None,
+        is_active=bool(is_active),
+        created_by_admin_id=admin_user.id,
+    )
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def update_email_template(
+    db: AsyncSession,
+    *,
+    template: EmailTemplate,
+    updates: Dict[str, Any],
+) -> EmailTemplate:
+    if "key" in updates:
+        key_value = (updates.get("key") or "").strip() or None
+        if key_value and key_value != template.key:
+            exists = await db.execute(select(EmailTemplate.id).where(EmailTemplate.key == key_value))
+            existing_id = exists.scalar_one_or_none()
+            if existing_id is not None and existing_id != template.id:
+                raise ValueError("Template key already exists")
+        template.key = key_value
+    if "name" in updates and updates.get("name") is not None:
+        template.name = str(updates["name"]).strip()
+    if "category" in updates and updates.get("category") is not None:
+        template.category = _normalize_template_category(str(updates["category"]))
+    if "language" in updates and updates.get("language") is not None:
+        template.language = _normalize_template_language(str(updates["language"]))
+    if "subject" in updates and updates.get("subject") is not None:
+        template.subject = str(updates["subject"]).strip()
+    if "preview_text" in updates:
+        template.preview_text = (str(updates.get("preview_text") or "").strip() or None)
+    if "body" in updates and updates.get("body") is not None:
+        template.body = str(updates["body"]).strip()
+    if "cta_label" in updates:
+        template.cta_label = (str(updates.get("cta_label") or "").strip() or None)
+    if "cta_url" in updates:
+        template.cta_url = (str(updates.get("cta_url") or "").strip() or None)
+    if "is_active" in updates and updates.get("is_active") is not None:
+        template.is_active = bool(updates.get("is_active"))
+
+    await db.commit()
+    await db.refresh(template)
+    return template
+
+
+async def get_email_template_by_id(db: AsyncSession, template_id) -> Optional[EmailTemplate]:
+    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id).limit(1))
+    return result.scalar_one_or_none()
+
+
+async def deactivate_email_template(db: AsyncSession, template: EmailTemplate) -> EmailTemplate:
+    template.is_active = False
+    await db.commit()
+    await db.refresh(template)
+    return template
+
+
+def _default_template_rows() -> List[Dict[str, str]]:
+    definitions = [
+        ("welcome", "Welcome"),
+        ("onboarding_reminder", "Onboarding Reminder"),
+        ("salary_reminder", "Salary Reminder"),
+        ("first_transaction", "First Transaction"),
+        ("envelope_setup", "Envelope Setup"),
+        ("passkey_reminder", "Passkey Reminder"),
+        ("monthly_checkin", "Monthly Check-in"),
+        ("custom", "Custom"),
+    ]
+    rows: List[Dict[str, str]] = []
+    for category, label in definitions:
+        rows.extend(
+            [
+                {
+                    "key": "{0}_{1}".format(category, "darija"),
+                    "name": "{0} (Darija)".format(label),
+                    "category": category,
+                    "language": "darija",
+                    "subject": "رسالة {0}".format(label.lower().replace("_", " ")),
+                    "preview_text": "رسالة قصيرة وواضحة.",
+                    "body": "سلام! بغينا نذكروك بخطوة بسيطة فـ 7sabek باش تبقى متابع الأمور المالية ديالك بشكل منظم.",
+                    "cta_label": "فتح 7sabek",
+                    "cta_url": "",
+                },
+                {
+                    "key": "{0}_{1}".format(category, "fr"),
+                    "name": "{0} (FR)".format(label),
+                    "category": category,
+                    "language": "fr",
+                    "subject": "{0} - 7sabek".format(label),
+                    "preview_text": "Message court et clair.",
+                    "body": "Bonjour, voici un rappel simple pour vous aider à avancer sereinement sur 7sabek.",
+                    "cta_label": "Ouvrir 7sabek",
+                    "cta_url": "",
+                },
+                {
+                    "key": "{0}_{1}".format(category, "en"),
+                    "name": "{0} (EN)".format(label),
+                    "category": category,
+                    "language": "en",
+                    "subject": "{0} - 7sabek".format(label),
+                    "preview_text": "Short and clear message.",
+                    "body": "Hi, here is a quick reminder to help you stay on track in 7sabek.",
+                    "cta_label": "Open 7sabek",
+                    "cta_url": "",
+                },
+            ]
+        )
+    return rows
+
+
+async def seed_default_email_templates(db: AsyncSession, *, admin_user: User) -> int:
+    inserted = 0
+    for row in _default_template_rows():
+        existing = await db.execute(select(EmailTemplate.id).where(EmailTemplate.key == row["key"]))
+        if existing.scalar_one_or_none() is not None:
+            continue
+        item = EmailTemplate(
+            key=row["key"],
+            name=row["name"],
+            category=row["category"],
+            language=row["language"],
+            subject=row["subject"],
+            preview_text=row["preview_text"],
+            body=row["body"],
+            cta_label=row["cta_label"],
+            cta_url=row["cta_url"],
+            is_active=True,
+            created_by_admin_id=admin_user.id,
+        )
+        db.add(item)
+        inserted += 1
+    if inserted > 0:
+        await db.commit()
+    return inserted

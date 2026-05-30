@@ -9,10 +9,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.config import get_settings
+from app.core.platform_settings import get_platform_settings
 from app.db.session import get_db
-from app.models import EmailDelivery, EmailDesignSettings, User
+from app.models import (
+    EmailDelivery,
+    EmailDesignSettings,
+    EmailTemplate,
+    Envelope,
+    OnboardingV2Record,
+    Transaction,
+    User,
+    UserPasskey,
+)
 from app.schemas.email_center import (
+    EmailCenterAISuggestIn,
+    EmailCenterAISuggestOut,
     EmailCenterStatusOut,
+    EmailCenterSystemStatusAIOut,
     EmailCenterSystemStatusCapabilitiesOut,
     EmailCenterSystemStatusDatabaseOut,
     EmailCenterSystemStatusFlagsOut,
@@ -20,6 +33,7 @@ from app.schemas.email_center import (
     EmailCenterSystemStatusOut,
     EmailCenterSystemStatusSafetyOut,
     EmailCenterSystemStatusStatsOut,
+    EmailCenterSystemStatusTemplatesOut,
     EmailCenterUserPreviewOut,
     EmailCenterUserSearchListOut,
     EmailCenterUserSearchOut,
@@ -28,19 +42,36 @@ from app.schemas.email_center import (
     EmailDesignSettingsIn,
     EmailDesignSettingsOut,
     EmailDesignSettingsPatch,
+    EmailTemplateCreate,
+    EmailTemplateListOut,
+    EmailTemplateOut,
+    EmailTemplateUpdate,
     SendUserEmailIn,
     SendTestEmailIn,
 )
 from app.services.email_center import (
     build_user_display_name,
     detect_user_email_language,
+    deactivate_email_template,
+    create_email_template,
+    get_email_template_by_id,
     get_delivery_history,
     get_or_create_design_settings,
     get_user_by_id_for_email_center,
+    list_email_templates,
     render_email_html,
     search_users_for_email_center,
+    seed_default_email_templates,
     send_user_email,
     send_test_email,
+    update_email_template,
+)
+from app.services.ai_gateway_client import (
+    AIGatewayConfigurationError,
+    AIGatewayUnsupportedProviderError,
+    AI_NOT_CONFIGURED_MESSAGE,
+    get_ai_gateway_status,
+    suggest_email_draft_via_gateway,
 )
 
 router = APIRouter(prefix="/superadmin/email-center")
@@ -54,6 +85,15 @@ def _require_superadmin(user: User) -> None:
 def _require_enabled() -> None:
     if not get_settings().email_center_enabled:
         raise HTTPException(status_code=404, detail="Email center disabled")
+
+
+def _templates_enabled() -> bool:
+    return bool(get_settings().email_center_templates_enabled)
+
+
+def _require_templates_enabled_for_write() -> None:
+    if not _templates_enabled():
+        raise HTTPException(status_code=403, detail="Email templates disabled")
 
 
 @router.get("/system-status", response_model=EmailCenterSystemStatusOut)
@@ -86,6 +126,8 @@ async def get_email_center_system_status(
     failed_count = 0
     skipped_count = 0
     latest_delivery_at = None
+    templates_count = 0
+    active_templates_count = 0
     if deliveries_table_ok:
         total_result = await db.execute(select(func.count(EmailDelivery.id)))
         total_deliveries = int(total_result.scalar_one() or 0)
@@ -106,9 +148,34 @@ async def get_email_center_system_status(
 
         latest_result = await db.execute(select(func.max(EmailDelivery.created_at)))
         latest_delivery_at = latest_result.scalar_one_or_none()
+    try:
+        template_total_result = await db.execute(select(func.count(EmailTemplate.id)))
+        templates_count = int(template_total_result.scalar_one() or 0)
+        active_template_result = await db.execute(
+            select(func.count(EmailTemplate.id)).where(EmailTemplate.is_active.is_(True))
+        )
+        active_templates_count = int(active_template_result.scalar_one() or 0)
+    except Exception:
+        templates_count = 0
+        active_templates_count = 0
 
     mode_value = (settings.email_center_mode or "").strip().lower()
     test_recipient_configured = bool((settings.email_center_test_recipient_email or "").strip())
+    platform_settings = await get_platform_settings(db, create_if_missing=False)
+    ai_status = get_ai_gateway_status(platform_settings)
+    ai_enabled = bool(settings.email_center_ai_suggestions_enabled)
+    ai_configured = bool(ai_status["ai_gateway_configured"])
+    ai_model_configured = bool(ai_status["ai_default_model_configured"])
+    ai_capability = "ready" if (ai_enabled and ai_configured and ai_model_configured) else (
+        "disabled" if not ai_enabled else "missing_config"
+    )
+    templates_enabled = bool(settings.email_center_templates_enabled)
+    if not templates_enabled:
+        templates_capability = "disabled"
+    elif active_templates_count > 0:
+        templates_capability = "ready"
+    else:
+        templates_capability = "no_templates"
 
     return EmailCenterSystemStatusOut(
         enabled=settings.email_center_enabled,
@@ -120,6 +187,7 @@ async def get_email_center_system_status(
             allow_bulk_send=settings.email_center_allow_bulk_send,
             allow_scheduling=settings.email_center_allow_scheduling,
             allow_salary_reminders=settings.email_center_allow_salary_reminders,
+            templates_enabled=templates_enabled,
             allow_open_tracking=settings.email_center_allow_open_tracking,
             allow_click_tracking=settings.email_center_allow_click_tracking,
         ),
@@ -128,6 +196,18 @@ async def get_email_center_system_status(
             from_email=settings.mail_from,
             api_base_configured=bool((settings.mailtrap_api_base or "").strip()),
             token_configured=bool((settings.mailtrap_api_token or "").strip()),
+        ),
+        ai=EmailCenterSystemStatusAIOut(
+            ai_suggestions_enabled=ai_enabled,
+            ai_gateway_configured=ai_configured,
+            ai_default_model_configured=ai_model_configured,
+            ai_capability=ai_capability,
+        ),
+        templates=EmailCenterSystemStatusTemplatesOut(
+            templates_enabled=templates_enabled,
+            templates_count=templates_count,
+            active_templates_count=active_templates_count,
+            templates_capability=templates_capability,
         ),
         database=EmailCenterSystemStatusDatabaseOut(
             email_design_settings_table=design_table_ok,
@@ -144,7 +224,8 @@ async def get_email_center_system_status(
             bulk_send=False,
             scheduling=False,
             salary_reminders=False,
-            ai_suggestions=False,
+            ai_suggestions=ai_capability == "ready",
+            templates=templates_capability == "ready",
         ),
         safety=EmailCenterSystemStatusSafetyOut(
             bulk_send_blocked=not settings.email_center_allow_bulk_send,
@@ -187,8 +268,195 @@ async def get_email_center_status(
         allow_scheduling=settings.email_center_allow_scheduling,
         allow_salary_reminders=settings.email_center_allow_salary_reminders,
         allow_ai_suggestions=settings.email_center_ai_suggestions_enabled,
+        templates_enabled=settings.email_center_templates_enabled,
         allow_open_tracking=settings.email_center_allow_open_tracking,
         allow_click_tracking=settings.email_center_allow_click_tracking,
+    )
+
+
+@router.get("/templates", response_model=EmailTemplateListOut)
+async def get_templates(
+    language: str = Query(default=""),
+    category: str = Query(default=""),
+    active_only: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailTemplateListOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    if not _templates_enabled():
+        return EmailTemplateListOut(enabled=False, items=[])
+    items = await list_email_templates(
+        db,
+        language=(language or "").strip() or None,
+        category=(category or "").strip() or None,
+        active_only=bool(active_only),
+    )
+    return EmailTemplateListOut(enabled=True, items=[EmailTemplateOut.model_validate(item) for item in items])
+
+
+@router.post("/templates", response_model=EmailTemplateOut)
+async def create_template(
+    payload: EmailTemplateCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailTemplateOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_templates_enabled_for_write()
+    try:
+        item = await create_email_template(
+            db,
+            admin_user=current_user,
+            key=payload.key,
+            name=payload.name,
+            category=payload.category,
+            language=payload.language,
+            subject=payload.subject,
+            preview_text=payload.preview_text,
+            body=payload.body,
+            cta_label=payload.cta_label,
+            cta_url=payload.cta_url,
+            is_active=payload.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return EmailTemplateOut.model_validate(item)
+
+
+@router.patch("/templates/{template_id}", response_model=EmailTemplateOut)
+async def patch_template(
+    template_id: UUID,
+    payload: EmailTemplateUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailTemplateOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_templates_enabled_for_write()
+    item = await get_email_template_by_id(db, template_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    try:
+        updated = await update_email_template(db, template=item, updates=payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return EmailTemplateOut.model_validate(updated)
+
+
+@router.delete("/templates/{template_id}", response_model=EmailTemplateOut)
+async def delete_template(
+    template_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailTemplateOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_templates_enabled_for_write()
+    item = await get_email_template_by_id(db, template_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    updated = await deactivate_email_template(db, item)
+    return EmailTemplateOut.model_validate(updated)
+
+
+@router.post("/templates/seed-defaults")
+async def seed_templates(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _require_superadmin(current_user)
+    _require_enabled()
+    _require_templates_enabled_for_write()
+    inserted = await seed_default_email_templates(db, admin_user=current_user)
+    return {"status": "ok", "inserted": inserted}
+
+
+@router.post("/ai-suggest", response_model=EmailCenterAISuggestOut)
+async def ai_suggest_email_draft(
+    payload: EmailCenterAISuggestIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EmailCenterAISuggestOut:
+    _require_superadmin(current_user)
+    _require_enabled()
+    settings = get_settings()
+
+    if not settings.email_center_ai_suggestions_enabled:
+        raise HTTPException(status_code=403, detail="AI suggestions disabled")
+
+    language = (payload.language or "fr").strip().lower()
+    if language not in {"darija", "fr", "en"}:
+        raise HTTPException(status_code=422, detail="Invalid language")
+    tone = (payload.tone or "friendly").strip().lower()
+    if tone not in {"friendly", "professional", "motivational", "short"}:
+        raise HTTPException(status_code=422, detail="Invalid tone")
+    audience_type = (payload.audience_type or "test").strip().lower()
+    if audience_type not in {"test", "single_user"}:
+        raise HTTPException(status_code=422, detail="Invalid audience_type")
+
+    safe_user_context = None
+    if audience_type == "single_user":
+        if payload.user_id is None:
+            raise HTTPException(status_code=422, detail="user_id is required for single_user")
+        user = await get_user_by_id_for_email_center(db, user_id=payload.user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        first_name = (getattr(user, "first_name", None) or "").strip()
+        safe_user_context = {
+            "audience_type": "single_user",
+            "detected_language": detect_user_email_language(user),
+            "onboarding_completed": False,
+            "has_transactions": False,
+            "has_envelopes": False,
+            "has_passkey": False,
+        }
+        if payload.personalize_with_first_name and first_name:
+            safe_user_context["first_name"] = first_name
+
+        onboarding_count = await db.execute(
+            select(func.count(OnboardingV2Record.id)).where(OnboardingV2Record.user_id == user.id)
+        )
+        tx_count = await db.execute(
+            select(func.count(Transaction.id)).where(Transaction.user_id == user.id)
+        )
+        envelopes_count = await db.execute(
+            select(func.count(Envelope.id)).where(Envelope.user_id == user.id)
+        )
+        passkeys_count = await db.execute(
+            select(func.count(UserPasskey.id)).where(
+                UserPasskey.user_id == user.id, UserPasskey.revoked_at.is_(None)
+            )
+        )
+        safe_user_context["onboarding_completed"] = int(onboarding_count.scalar_one() or 0) > 0
+        safe_user_context["has_transactions"] = int(tx_count.scalar_one() or 0) > 0
+        safe_user_context["has_envelopes"] = int(envelopes_count.scalar_one() or 0) > 0
+        safe_user_context["has_passkey"] = int(passkeys_count.scalar_one() or 0) > 0
+
+    try:
+        suggestion = await suggest_email_draft_via_gateway(
+            db,
+            language=language,
+            tone=tone,
+            goal=payload.goal,
+            audience_type=audience_type,
+            cta_url=payload.cta_url,
+            cta_label_hint=payload.cta_label_hint,
+            safe_user_context=safe_user_context,
+        )
+    except AIGatewayConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=AI_NOT_CONFIGURED_MESSAGE) from exc
+    except AIGatewayUnsupportedProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return EmailCenterAISuggestOut(
+        subject=suggestion["subject"],
+        preview_text=suggestion["preview_text"],
+        body=suggestion["body"],
+        cta_label=suggestion["cta_label"],
     )
 
 
