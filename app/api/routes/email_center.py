@@ -20,10 +20,7 @@ from app.models import (
     User,
     UserPasskey,
 )
-try:
-    from app.models.email_template import EmailTemplate
-except Exception:  # pragma: no cover
-    EmailTemplate = None  # type: ignore[assignment]
+from app.models.email_template import EmailTemplate
 from app.schemas.email_center import (
     EmailCenterAISuggestIn,
     EmailCenterAISuggestOut,
@@ -78,6 +75,19 @@ from app.services.ai_gateway_client import (
 )
 
 router = APIRouter(prefix="/superadmin/email-center")
+TEMPLATE_ALLOWED_LANGUAGES = {"darija", "fr", "en"}
+TEMPLATE_ALLOWED_CATEGORIES = {
+    "welcome",
+    "onboarding_reminder",
+    "salary_reminder",
+    "first_transaction",
+    "envelope_setup",
+    "passkey_reminder",
+    "monthly_checkin",
+    "product_update",
+    "maintenance",
+    "custom",
+}
 
 
 def _require_superadmin(user: User) -> None:
@@ -91,7 +101,21 @@ def _require_enabled() -> None:
 
 
 def _templates_enabled() -> bool:
-    return bool(get_settings().email_center_templates_enabled) and EmailTemplate is not None
+    return bool(get_settings().email_center_templates_enabled)
+
+
+def _validate_template_language(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in TEMPLATE_ALLOWED_LANGUAGES:
+        raise HTTPException(status_code=422, detail="Invalid template language")
+    return normalized
+
+
+def _validate_template_category(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in TEMPLATE_ALLOWED_CATEGORIES:
+        raise HTTPException(status_code=422, detail="Invalid template category")
+    return normalized
 
 
 def _require_templates_enabled_for_write() -> None:
@@ -129,8 +153,8 @@ async def get_email_center_system_status(
     failed_count = 0
     skipped_count = 0
     latest_delivery_at = None
-    templates_count = 0
-    active_templates_count = 0
+    templates_count = None
+    active_templates_count = None
     if deliveries_table_ok:
         total_result = await db.execute(select(func.count(EmailDelivery.id)))
         total_deliveries = int(total_result.scalar_one() or 0)
@@ -151,17 +175,18 @@ async def get_email_center_system_status(
 
         latest_result = await db.execute(select(func.max(EmailDelivery.created_at)))
         latest_delivery_at = latest_result.scalar_one_or_none()
-    if EmailTemplate is not None:
-        try:
-            template_total_result = await db.execute(select(func.count(EmailTemplate.id)))
-            templates_count = int(template_total_result.scalar_one() or 0)
-            active_template_result = await db.execute(
-                select(func.count(EmailTemplate.id)).where(EmailTemplate.is_active.is_(True))
-            )
-            active_templates_count = int(active_template_result.scalar_one() or 0)
-        except Exception:
-            templates_count = 0
-            active_templates_count = 0
+    templates_migration_required = False
+    try:
+        template_total_result = await db.execute(select(func.count(EmailTemplate.id)))
+        templates_count = int(template_total_result.scalar_one() or 0)
+        active_template_result = await db.execute(
+            select(func.count(EmailTemplate.id)).where(EmailTemplate.is_active.is_(True))
+        )
+        active_templates_count = int(active_template_result.scalar_one() or 0)
+    except Exception:
+        templates_count = None
+        active_templates_count = None
+        templates_migration_required = True
 
     mode_value = (settings.email_center_mode or "").strip().lower()
     test_recipient_configured = bool((settings.email_center_test_recipient_email or "").strip())
@@ -174,11 +199,11 @@ async def get_email_center_system_status(
         "disabled" if not ai_enabled else "missing_config"
     )
     templates_enabled = bool(settings.email_center_templates_enabled)
-    if EmailTemplate is None:
-        templates_capability = "not_implemented"
+    if templates_migration_required:
+        templates_capability = "migration_required"
     elif not templates_enabled:
         templates_capability = "disabled"
-    elif active_templates_count > 0:
+    elif int(active_templates_count or 0) > 0:
         templates_capability = "ready"
     else:
         templates_capability = "no_templates"
@@ -284,7 +309,7 @@ async def get_email_center_status(
 async def get_templates(
     language: str = Query(default=""),
     category: str = Query(default=""),
-    active_only: bool = Query(default=False),
+    active_only: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> EmailTemplateListOut:
@@ -292,10 +317,17 @@ async def get_templates(
     _require_enabled()
     if not _templates_enabled():
         return EmailTemplateListOut(enabled=False, items=[])
+    language_value = (language or "").strip()
+    category_value = (category or "").strip()
+    if language_value:
+        _validate_template_language(language_value)
+    if category_value:
+        _validate_template_category(category_value)
+
     items = await list_email_templates(
         db,
-        language=(language or "").strip() or None,
-        category=(category or "").strip() or None,
+        language=language_value or None,
+        category=category_value or None,
         active_only=bool(active_only),
     )
     return EmailTemplateListOut(enabled=True, items=[EmailTemplateOut.model_validate(item) for item in items])
@@ -310,6 +342,10 @@ async def create_template(
     _require_superadmin(current_user)
     _require_enabled()
     _require_templates_enabled_for_write()
+    _validate_template_language(payload.language)
+    _validate_template_category(payload.category)
+    if not payload.name.strip() or not payload.subject.strip() or not payload.body.strip():
+        raise HTTPException(status_code=422, detail="Template name, subject and body are required")
     try:
         item = await create_email_template(
             db,
@@ -340,11 +376,22 @@ async def patch_template(
     _require_superadmin(current_user)
     _require_enabled()
     _require_templates_enabled_for_write()
+    updates = payload.model_dump(exclude_unset=True)
+    if "language" in updates and updates.get("language") is not None:
+        _validate_template_language(str(updates["language"]))
+    if "category" in updates and updates.get("category") is not None:
+        _validate_template_category(str(updates["category"]))
+    if "name" in updates and updates.get("name") is not None and not str(updates["name"]).strip():
+        raise HTTPException(status_code=422, detail="Template name is required")
+    if "subject" in updates and updates.get("subject") is not None and not str(updates["subject"]).strip():
+        raise HTTPException(status_code=422, detail="Template subject is required")
+    if "body" in updates and updates.get("body") is not None and not str(updates["body"]).strip():
+        raise HTTPException(status_code=422, detail="Template body is required")
     item = await get_email_template_by_id(db, template_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Template not found")
     try:
-        updated = await update_email_template(db, template=item, updates=payload.model_dump(exclude_unset=True))
+        updated = await update_email_template(db, template=item, updates=updates)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return EmailTemplateOut.model_validate(updated)

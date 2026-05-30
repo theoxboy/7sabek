@@ -248,8 +248,8 @@ class EmailCenterSystemStatusAIOut(BaseModel):
 
 class EmailCenterSystemStatusTemplatesOut(BaseModel):
     templates_enabled: bool
-    templates_count: int
-    active_templates_count: int
+    templates_count: Optional[int] = None
+    active_templates_count: Optional[int] = None
     templates_capability: str
 
 
