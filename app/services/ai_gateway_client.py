@@ -513,6 +513,13 @@ async def _chat_completion_openai(
         if clean_key:
             headers[clean_key] = clean_value
 
+    # Add OpenRouter specific headers if targeting openrouter.ai
+    if "openrouter.ai" in base_url.lower():
+        if "HTTP-Referer" not in headers and "http-referer" not in headers:
+            headers["HTTP-Referer"] = "https://7sabek.ma"
+        if "X-Title" not in headers and "x-title" not in headers:
+            headers["X-Title"] = "7sabek Floussy"
+
     payload: dict[str, Any] = {
         "model": model,
         "messages": openai_messages,
