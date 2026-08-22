@@ -459,7 +459,9 @@ async def advisor_chat(
             system_prompt=system_prompt,
         )
     except Exception as exc:
-        # If external AI provider fails or times out, seamlessly return data-driven advisory fallback
-        reply = _generate_advisor_fallback_response(user_context, last_user_prompt)
+        err_msg = str(exc)
+        # Display clear diagnostic if gateway fails so superadmin knows immediately why
+        fallback_text = _generate_advisor_fallback_response(user_context, last_user_prompt)
+        reply = f"⚠️ **[Diagnostic IA]** : `{err_msg}`\n\n---\n\n{fallback_text}"
 
     return AdvisorChatResponseOut(text=reply)
