@@ -112,6 +112,12 @@ def _resolve_gateway(settings: Any) -> Tuple[Dict[str, Any], str]:
     base_url = _safe_string(selected.get("base_url")).lower()
     provider = _safe_string(selected.get("provider")).lower()
 
+    # Clean model if user copied "(ou ...)" or extra commentary text
+    if " (" in model:
+        model = model.split(" (")[0].strip()
+    elif " " in model:
+        model = model.split(" ")[0].strip()
+
     # Auto-heal placeholder, blank or invalid model string
     if not model or "..." in model or ("gpt" in model and "claude" in model and "gemini" in model):
         if "openrouter.ai" in base_url or provider == "openrouter":
