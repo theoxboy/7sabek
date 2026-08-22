@@ -14,7 +14,7 @@ _TS_ITEM_PATTERN = re.compile(r'^\s*(?:"([^"]+)"|([a-zA-Z0-9_\u0600-\u06ff]+))\s
 
 
 def _load_frontend_aliases() -> dict[str, str]:
-    ts_path = Path("floussy-web/src/lib/categoryCatalog.ts")
+    ts_path = Path("../7sabek Frontend/src/lib/categoryCatalog.ts")
     content = ts_path.read_text(encoding="utf-8")
     block_match = _TS_ALIAS_PATTERN.search(content)
     if block_match is None:

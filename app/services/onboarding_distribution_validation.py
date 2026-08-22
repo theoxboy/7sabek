@@ -27,6 +27,7 @@ EXCLUDED_MORONA_SCOPE_KEYS = {
     "bills",
     "debts",
     "goals",
+    "free_balance",
 }
 
 

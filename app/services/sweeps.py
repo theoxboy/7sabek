@@ -7,11 +7,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Envelope, EnvelopePeriod, Sweep, Transaction, TransactionType, User
+from app.models import Category, Envelope, EnvelopePeriod, EnvelopeMovement, Sweep, Transaction, TransactionType, User
 from app.services.balances import compute_period_balance
 from app.services.envelope_rules import is_sweep_eligible_envelope
 from app.services.periods import period_bounds
 from app.services.sweep_context import resolve_user_sweep_anchor_date
+from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS_SQL
 
 
 async def _get_or_create_period(
@@ -45,15 +46,43 @@ async def _get_or_create_period(
     return period
 
 
-async def run_sweep(db: AsyncSession, user: User, as_of: date) -> tuple[int, int]:
-    anchor = await resolve_user_sweep_anchor_date(db, user)
-    # period_end is exclusive; use the prior day to target the bucket ending at as_of.
-    target_day = as_of - timedelta(days=1)
-    period_start, period_end = period_bounds(
-        anchor, target_day, user.sweep_interval_days
+async def _resolve_force_period_start(
+    db: AsyncSession,
+    user_id: UUID,
+    envelope_id: UUID,
+    as_of: date,
+    sweep_interval_days: int,
+) -> date:
+    # Each envelope's currently-active period can have its own period_start
+    # (periods are created lazily), so this must be resolved per envelope
+    # rather than borrowed from an arbitrary row shared across envelopes.
+    period_query = await db.execute(
+        select(EnvelopePeriod.period_start).where(
+            EnvelopePeriod.user_id == user_id,
+            EnvelopePeriod.envelope_id == envelope_id,
+            EnvelopePeriod.period_end == as_of,
+        )
+        .limit(1)
     )
-    if period_end != as_of:
-        raise ValueError("as_of must align with the exclusive period end")
+    found_start = period_query.scalar_one_or_none()
+    if found_start is not None:
+        return found_start
+    return as_of - timedelta(days=sweep_interval_days)
+
+
+async def run_sweep(db: AsyncSession, user: User, as_of: date, force: bool = False) -> tuple[int, int]:
+    anchor = await resolve_user_sweep_anchor_date(db, user)
+    if force:
+        period_start = None  # resolved per envelope below
+        period_end = as_of
+    else:
+        # period_end is exclusive; use the prior day to target the bucket ending at as_of.
+        target_day = as_of - timedelta(days=1)
+        period_start, period_end = period_bounds(
+            anchor, target_day, user.sweep_interval_days
+        )
+        if period_end != as_of:
+            raise ValueError("as_of must align with the exclusive period end")
 
     default_result = await db.execute(
         select(Envelope).where(
@@ -77,11 +106,18 @@ async def run_sweep(db: AsyncSession, user: User, as_of: date) -> tuple[int, int
         if is_sweep_eligible_envelope(envelope)
     ]
 
+    if force:
+        savings_period_start = await _resolve_force_period_start(
+            db, user.id, default_savings.id, as_of, user.sweep_interval_days
+        )
+    else:
+        savings_period_start = period_start
+
     savings_period = await _get_or_create_period(
         db,
         user.id,
         default_savings.id,
-        period_start,
+        savings_period_start,
         period_end,
     )
 
@@ -89,11 +125,18 @@ async def run_sweep(db: AsyncSession, user: User, as_of: date) -> tuple[int, int
     periods_swept = 0
 
     for envelope in envelopes:
+        if force:
+            env_period_start = await _resolve_force_period_start(
+                db, user.id, envelope.id, as_of, user.sweep_interval_days
+            )
+        else:
+            env_period_start = period_start
+
         period = await _get_or_create_period(
             db,
             user.id,
             envelope.id,
-            period_start,
+            env_period_start,
             period_end,
         )
 
@@ -109,9 +152,14 @@ async def run_sweep(db: AsyncSession, user: User, as_of: date) -> tuple[int, int
             db.add(sweep)
             sweeps_created += 1
 
-        next_start, next_end = period_bounds(
-            anchor, period.period_end, user.sweep_interval_days
-        )
+        if force and anchor != period.period_end:
+            next_start = period.period_end
+            _, normal_end = period_bounds(anchor, env_period_start, user.sweep_interval_days)
+            _, next_end = period_bounds(anchor, normal_end, user.sweep_interval_days)
+        else:
+            next_start, next_end = period_bounds(
+                anchor, period.period_end, user.sweep_interval_days
+            )
         await _get_or_create_period(
             db,
             user.id,
@@ -125,6 +173,39 @@ async def run_sweep(db: AsyncSession, user: User, as_of: date) -> tuple[int, int
 
     await db.commit()
     return periods_swept, sweeps_created
+
+
+async def force_close_current_cycle(
+    db: AsyncSession,
+    user: User,
+    early_date: date,
+    permanent_shift: bool,
+) -> None:
+    if permanent_shift:
+        from app.services.sweep_context import get_latest_onboarding_record
+        record = await get_latest_onboarding_record(db, user.id)
+        if record and isinstance(record.payload, dict):
+            new_payload = dict(record.payload)
+            new_payload["sweep_anchor_date"] = early_date.isoformat()
+            record.payload = new_payload
+            db.add(record)
+            await db.flush()
+
+    active_periods_res = await db.execute(
+        select(EnvelopePeriod)
+        .where(
+            EnvelopePeriod.user_id == user.id,
+            EnvelopePeriod.period_start <= early_date,
+            EnvelopePeriod.period_end > early_date,
+        )
+    )
+    active_periods = list(active_periods_res.scalars().all())
+    for period in active_periods:
+        period.period_end = early_date
+        db.add(period)
+    await db.flush()
+
+    await run_sweep(db, user, early_date, force=True)
 
 
 async def preview_sweep(
@@ -224,9 +305,12 @@ async def run_due_sweeps(
             anchor, target_day, locked_user.sweep_interval_days
         )
         income_count_result = await db.execute(
-            select(func.count(Transaction.id)).where(
+            select(func.count(Transaction.id))
+            .join(Category, Transaction.category_id == Category.id)
+            .where(
                 Transaction.user_id == locked_user.id,
                 Transaction.type == TransactionType.INCOME,
+                Category.name.in_(INTERNAL_INCOME_CATEGORY_KEYS_SQL),
                 Transaction.occurred_on >= period_start,
                 Transaction.occurred_on < due_end,
             )

@@ -28,6 +28,8 @@ class EnvelopeOut(BaseModel):
     is_cash: bool
     is_goal: bool
     deletable: bool
+    is_debt: bool
+
 
 
 class EnvelopeAdjustmentCreate(BaseModel):

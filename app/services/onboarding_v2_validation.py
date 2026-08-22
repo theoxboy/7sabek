@@ -15,6 +15,15 @@ DEBT_NAME_MIN_LEN = 2
 DEBT_NAME_MAX_LEN = 60
 ALLOWED_DEBT_PAYMENT_CADENCES = {"monthly", "weekly", "biweekly", "quarterly", "annual"}
 
+INCOME_MIN = 0.0
+INCOME_MAX = 2_000_000.0
+INCOME_FIELD_BY_TYPE = {
+    "salaried": "S2a_salary_amount",
+    "hirafi": "H3_income_profile_min",
+    "freelancer": "F7_min_income",
+    "mixed": "M3_min_income",
+}
+
 
 @dataclass(frozen=True)
 class OnboardingValidationError:
@@ -110,6 +119,22 @@ def validate_onboarding_answers(answers: dict[str, Any]) -> list[OnboardingValid
         ]
 
     errors: list[OnboardingValidationError] = []
+
+    income_type = _safe_string(answers.get("Q0_income_type"))
+    income_field = INCOME_FIELD_BY_TYPE.get(income_type)
+    if income_field:
+        income_amount = _safe_number(answers.get(income_field))
+        if income_amount is not None and (
+            income_amount < INCOME_MIN or income_amount > INCOME_MAX
+        ):
+            errors.append(
+                OnboardingValidationError(
+                    code="INCOME_AMOUNT_OUT_OF_RANGE",
+                    field=income_field,
+                    message=f"Income amount must be between {int(INCOME_MIN)} and {int(INCOME_MAX)}.",
+                )
+            )
+
     has_debt = _safe_string(answers.get("E5_has_debt")) == "yes"
     if not has_debt:
         return errors

@@ -23,6 +23,7 @@ from app.services.onboarding_distribution_validation import (
     validate_apply_preconditions,
 )
 from app.services.envelope_virtual import is_virtual_parent_envelope_name
+from app.services.envelope_rules import normalize_name
 from app.services.onboarding_v2_canonical import (
     ExistingApplyState,
     compute_canonical_apply_state_backend,
@@ -78,7 +79,7 @@ def _safe_priority(value: Any, default: int = 2) -> int:
 
 
 def _name_key(value: str) -> str:
-    return value.strip().casefold()
+    return normalize_name(value)
 
 
 def build_onboarding_materialized_state(summary: dict[str, Any]) -> dict[str, Any]:
@@ -454,6 +455,22 @@ async def apply_onboarding_v2_payload(
         canonical_state.cash_flow_timing_v1.get("last_income_date") or answers.get("SWP1_last_income_date")
     )
     if isinstance(bootstrap_anchor_date, date):
+        if user.sweep_interval_days == 30:
+            fixed_day_raw = (
+                answers.get("S4a_fixed_day")
+                or answers.get("M2b_monthly_fixed_day")
+                or answers.get("F3a_retainer_fixed_day")
+            )
+            if fixed_day_raw:
+                try:
+                    fixed_day = int(fixed_day_raw)
+                    if 1 <= fixed_day <= 31:
+                        import calendar
+                        last_day = calendar.monthrange(bootstrap_anchor_date.year, bootstrap_anchor_date.month)[1]
+                        clamped_day = min(fixed_day, last_day)
+                        bootstrap_anchor_date = date(bootstrap_anchor_date.year, bootstrap_anchor_date.month, clamped_day)
+                except (ValueError, TypeError):
+                    pass
         user.next_sweep_date = bootstrap_anchor_date + timedelta(days=user.sweep_interval_days)
 
     explicit_custom_category_pairs: list[tuple[str, str]] = []
@@ -847,4 +864,62 @@ async def apply_onboarding_v2_payload(
         summary=summary,
     )
 
+    # Flush the session to persist rules and envelopes before applying transaction effects.
+    await db.flush()
+
+    # Extract starting balance amount from sanity metrics
+    income_est = canonical_state.sanity_metrics.get("incomeEstimate")
+    try:
+        starting_balance_amount = Decimal(str(income_est)) if income_est else Decimal("0.00")
+    except (InvalidOperation, ValueError, TypeError):
+        starting_balance_amount = Decimal("0.00")
+
+    if starting_balance_amount > 0:
+        # Resolve anchor date and find current period start date
+        anchor_date = bootstrap_anchor_date
+        if not isinstance(anchor_date, date):
+            anchor_date = user.created_at.date() if user.created_at else date.today()
+
+        from app.services.periods import period_bounds
+        current_period_start, _ = period_bounds(anchor_date, date.today(), user.sweep_interval_days)
+
+        # Resolve default income category (income_general)
+        from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEY
+        from app.models.transaction import TransactionType
+        from app.services.transactions import create_transaction_with_effects
+
+        income_category_key = _name_key(INTERNAL_INCOME_CATEGORY_KEY)
+        income_category = category_by_name.get(income_category_key)
+        if income_category is None:
+            db_res = await db.execute(
+                select(Category).where(
+                    Category.user_id == user.id,
+                    Category.name == INTERNAL_INCOME_CATEGORY_KEY,
+                )
+            )
+            income_category = db_res.scalar_one_or_none()
+            if income_category is None:
+                income_category = Category(
+                    user_id=user.id,
+                    name=INTERNAL_INCOME_CATEGORY_KEY,
+                )
+                db.add(income_category)
+                await db.flush()
+            category_by_name[income_category_key] = income_category
+
+        # Inject starting balance transaction and apply initial distribution rules
+        await create_transaction_with_effects(
+            db=db,
+            user=user,
+            category=income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=starting_balance_amount,
+            occurred_on=current_period_start,
+            description="Starting Balance",
+            source="manual",
+            commit=False,
+            enforce_auto_distribution_flag=False,
+        )
+
     return summary
+

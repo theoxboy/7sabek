@@ -20,14 +20,14 @@ def test_suggest_envelope_for_phone_prefers_bills() -> None:
     envelopes = [_env("Factures"), _env("Loisirs"), _env("Nourriture")]
     selected = suggest_envelope_for_category_name("phone", envelopes)
     assert selected is not None
-    assert selected.name == "Factures"
+    assert selected.name == "factures"
 
 
 def test_suggest_envelope_for_family_prefers_family_envelope() -> None:
     envelopes = [_env("Aide famille"), _env("التوازن"), _env("Nourriture")]
     selected = suggest_envelope_for_category_name("children_school", envelopes)
     assert selected is not None
-    assert selected.name == "Aide famille"
+    assert selected.name == "aide famille"
 
 
 def test_suggest_envelope_for_family_without_family_returns_none() -> None:
@@ -45,11 +45,11 @@ def test_transport_generic_does_not_map_to_specialized_auto_envelope() -> None:
     envelopes = [_env("Assurance auto"), _env("Carburant"), _env("Transport")]
     selected = suggest_envelope_for_category_name("transport_generic", envelopes)
     assert selected is not None
-    assert selected.name == "Transport"
+    assert selected.name == "transport"
 
 
 def test_health_generic_prefers_health_over_food() -> None:
     envelopes = [_env("Nourriture"), _env("الصحة"), _env("Factures")]
     selected = suggest_envelope_for_category_name("health_generic", envelopes)
     assert selected is not None
-    assert selected.name == "الصحة"
+    assert selected.name == "الصحه"

@@ -92,6 +92,7 @@ class DashboardAlertOut(BaseModel):
     sweep_due: bool
     current_period: Optional[CurrentPeriodOut] = None
     sweep_status: Optional["SweepStatusOut"] = None
+    sweep_bootstrap: Optional["SweepBootstrapOut"] = None
 
 
 class DashboardTrendPointOut(BaseModel):

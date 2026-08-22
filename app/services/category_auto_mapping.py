@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Category, CategoryEnvelopeMap, Envelope
 from app.services.category_catalog import category_key_from_name, is_internal_income_category_key
-from app.services.envelope_rules import is_category_mappable_envelope
+from app.services.envelope_rules import is_category_mappable_envelope, normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ _NON_ALNUM = re.compile(r"[^a-z0-9\u0600-\u06ff]+", re.IGNORECASE)
 
 
 def _norm(value: str) -> str:
-    return _NON_ALNUM.sub(" ", value.strip().lower()).strip()
+    return _NON_ALNUM.sub(" ", normalize_name(value)).strip()
 
 
 _CATEGORY_GROUP_BY_KEY: dict[str, str] = {

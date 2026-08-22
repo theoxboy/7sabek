@@ -15,9 +15,10 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.base import Base
+from app.services.envelope_rules import normalize_name
 
 
 class Envelope(Base):
@@ -68,3 +69,16 @@ class Envelope(Base):
     category_mappings: Mapped[List["CategoryEnvelopeMap"]] = relationship(
         back_populates="envelope"
     )
+
+    @property
+    def is_debt(self) -> bool:
+        from app.services.envelope_rules import name_key, _DEBT_KEYWORDS
+        key = name_key(self.name)
+        return any(keyword in key for keyword in _DEBT_KEYWORDS)
+
+    @validates("name")
+    def validate_name(self, key, value):
+        if not value:
+            return value
+        return normalize_name(value)
+

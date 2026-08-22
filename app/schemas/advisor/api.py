@@ -56,6 +56,31 @@ class PostAdvisorAcceptRequest(AdvisorApiBaseModel):
     confirm: bool
 
 
+# ---------------------------------------------------------------------------
+# Chat (conversational advisor) schemas
+# ---------------------------------------------------------------------------
+
+
+class ChatMessageIn(AdvisorApiBaseModel):
+    """A single message in the chat conversation."""
+
+    role: str = Field(..., pattern="^(user|model|system|assistant)$")
+    text: str = Field(..., min_length=1)
+
+
+class AdvisorChatRequestIn(AdvisorApiBaseModel):
+    """Request body for POST /advisor/chat."""
+
+    messages: list[ChatMessageIn] = Field(..., min_length=1)
+    system_prompt: Optional[str] = None
+
+
+class AdvisorChatResponseOut(AdvisorApiBaseModel):
+    """Response body for POST /advisor/chat."""
+
+    text: str
+
+
 # Backward-compatible aliases used by current service/router wiring.
 AdvisorPreviewRequestIn = PostAdvisorPreviewRequest
 AdvisorPreviewEnvelopeOut = PostAdvisorPreviewResponse

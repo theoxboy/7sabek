@@ -17,12 +17,14 @@ def make_alembic_config(database_url: str) -> Config:
     return cfg
 
 
-def alembic_upgrade(cfg: Config, revision: str = "head") -> None:
-    command.upgrade(cfg, revision)
+async def alembic_upgrade(cfg: Config, revision: str = "head") -> None:
+    import asyncio
+    await asyncio.to_thread(command.upgrade, cfg, revision)
 
 
-def alembic_downgrade(cfg: Config, revision: str) -> None:
-    command.downgrade(cfg, revision)
+async def alembic_downgrade(cfg: Config, revision: str) -> None:
+    import asyncio
+    await asyncio.to_thread(command.downgrade, cfg, revision)
 
 
 def make_async_engine(database_url: str) -> AsyncEngine:

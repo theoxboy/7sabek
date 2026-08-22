@@ -158,6 +158,11 @@ def test_password_reset_confirm_rejects_same_password(client, monkeypatch) -> No
 def test_superadmin_password_reset_requires_code_and_first_name(
     client, monkeypatch, database_url: str
 ) -> None:
+    from app.core.config import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "superadmin_password_reset_code", "4303")
+    monkeypatch.setattr(settings, "superadmin_password_reset_first_name", "OMAR")
+
     email = "superadmin-reset@example.com"
     old_password = "Floussy2026"
     new_password = "Floussy2027"

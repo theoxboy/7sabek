@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import logging
 from typing import Optional
 from uuid import UUID
@@ -34,10 +34,14 @@ from app.services.transactions import (
     get_or_create_envelope_period,
     resolve_cash_envelope,
     resolve_envelope_for_category,
+    propagate_period_balances,
 )
 from app.services.sweep_context import resolve_user_sweep_anchor_date
 from app.services.sweeps import run_due_sweeps
 from app.services.gamification import to_local_date
+from app.services.periods import get_effective_income_date
+from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS
+
 
 router = APIRouter(prefix="/transactions")
 logger = logging.getLogger("app.transactions")
@@ -49,6 +53,12 @@ async def create_transaction(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> TransactionOut:
+    if payload.occurred_on > date.today() + timedelta(days=7):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="TRANSACTION_DATE_TOO_FAR_IN_FUTURE",
+        )
+
     category_result = await db.execute(
         select(Category).where(
             Category.id == payload.category_id,
@@ -69,6 +79,7 @@ async def create_transaction(
         payload.occurred_on,
         payload.description,
         payload.source,
+        payload.permanent_shift,
     )
 
     result = await db.execute(
@@ -126,6 +137,20 @@ async def update_transaction(
     if transaction is None:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
+    if payload.occurred_on is not None and payload.occurred_on > date.today() + timedelta(days=7):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="TRANSACTION_DATE_TOO_FAR_IN_FUTURE",
+        )
+
+    # 1. Valider le type, la catégorie et le mapping d'enveloppe AVANT toute mutation de l'objet
+    new_type = (
+        TransactionType(payload.type)
+        if payload.type is not None
+        else transaction.type
+    )
+    new_category_id = payload.category_id or transaction.category_id
+
     if payload.category_id is not None:
         category_result = await db.execute(
             select(Category).where(
@@ -136,14 +161,27 @@ async def update_transaction(
         if category_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=404, detail="Category not found")
 
+    envelope = None
+    if new_type == TransactionType.EXPENSE:
+        envelope = await resolve_envelope_for_category(
+            db, current_user.id, new_category_id
+        )
+        if envelope is None:
+            raise HTTPException(status_code=400, detail="CATEGORY_NOT_MAPPED")
+    elif new_type == TransactionType.INCOME:
+        envelope = await resolve_cash_envelope(db, current_user.id)
+
+    # 2. Récupérer l'enveloppe d'origine pour propager ses soldes après modification
+    old_envelope = None
+    if transaction.type == TransactionType.EXPENSE:
+        old_envelope = await resolve_envelope_for_category(db, current_user.id, transaction.category_id)
+    elif transaction.type == TransactionType.INCOME:
+        old_envelope = await resolve_cash_envelope(db, current_user.id)
+
+    old_occurred_on = transaction.occurred_on
     old_type = transaction.type
 
-    new_type = (
-        TransactionType(payload.type)
-        if payload.type is not None
-        else transaction.type
-    )
-    new_category_id = payload.category_id or transaction.category_id
+    # 3. Procéder aux mutations
     new_amount = payload.amount if payload.amount is not None else transaction.amount
     new_occurred_on = (
         payload.occurred_on if payload.occurred_on is not None else transaction.occurred_on
@@ -162,6 +200,7 @@ async def update_transaction(
     transaction.description = new_description
     transaction.source = new_source
 
+    # 4. Nettoyer les effets de l'ancienne distribution
     if old_type == TransactionType.INCOME:
         await clear_income_distribution_effects(
             db,
@@ -169,28 +208,31 @@ async def update_transaction(
             transaction_id=transaction.id,
         )
 
-    envelope = None
-    period = None
-    if new_type == TransactionType.EXPENSE:
-        envelope = await resolve_envelope_for_category(
-            db, current_user.id, new_category_id
-        )
-        if envelope is None:
-            raise HTTPException(status_code=400, detail="CATEGORY_NOT_MAPPED")
-    elif new_type == TransactionType.INCOME:
-        envelope = await resolve_cash_envelope(db, current_user.id)
-
     await db.execute(
         delete(EnvelopeMovement).where(EnvelopeMovement.transaction_id == transaction.id)
     )
 
+    # 5. Appliquer les mouvements et distributions sur la nouvelle enveloppe
     if envelope is not None:
         anchor_date = await resolve_user_sweep_anchor_date(db, current_user)
+        category_result = await db.execute(
+            select(Category).where(
+                Category.id == new_category_id,
+                Category.user_id == current_user.id,
+            )
+        )
+        new_category = category_result.scalar_one_or_none()
+        effective_occurred_on = new_occurred_on
+        if new_type == TransactionType.INCOME and new_category is not None and new_category.name in INTERNAL_INCOME_CATEGORY_KEYS:
+            effective_occurred_on = get_effective_income_date(
+                new_occurred_on, anchor_date, current_user.sweep_interval_days
+            )
+
         period = await get_or_create_envelope_period(
             db,
             current_user.id,
             envelope.id,
-            new_occurred_on,
+            effective_occurred_on,
             current_user.sweep_interval_days,
             anchor_date,
         )
@@ -201,16 +243,44 @@ async def update_transaction(
             amount=-new_amount if new_type == TransactionType.EXPENSE else new_amount,
         )
         db.add(movement)
+        await propagate_period_balances(db, current_user.id, envelope.id, period.period_start)
+
         if new_type == TransactionType.INCOME and period is not None:
             await apply_income_distribution_for_transaction(
                 db,
                 user=current_user,
                 transaction_id=transaction.id,
                 amount=new_amount,
-                occurred_on=new_occurred_on,
+                occurred_on=effective_occurred_on,
                 period_start=period.period_start,
                 period_end=period.period_end,
             )
+
+    # 6. Propager également l'ancienne enveloppe si elle est différente de la nouvelle ou si la date a changé
+    if old_envelope is not None:
+        anchor_date = await resolve_user_sweep_anchor_date(db, current_user)
+        old_category_result = await db.execute(
+            select(Category).where(
+                Category.id == transaction.category_id,
+                Category.user_id == current_user.id,
+            )
+        )
+        old_category = old_category_result.scalar_one_or_none()
+        old_effective_occurred_on = old_occurred_on
+        if old_type == TransactionType.INCOME and old_category is not None and old_category.name in INTERNAL_INCOME_CATEGORY_KEYS:
+            old_effective_occurred_on = get_effective_income_date(
+                old_occurred_on, anchor_date, current_user.sweep_interval_days
+            )
+
+        old_period = await get_or_create_envelope_period(
+            db,
+            current_user.id,
+            old_envelope.id,
+            old_effective_occurred_on,
+            current_user.sweep_interval_days,
+            anchor_date,
+        )
+        await propagate_period_balances(db, current_user.id, old_envelope.id, old_period.period_start)
 
     await db.commit()
 
@@ -239,6 +309,15 @@ async def delete_transaction(
         if transaction is None:
             raise HTTPException(status_code=404, detail="Transaction not found")
 
+        # 1. Identifier l'enveloppe et la date avant suppression pour propager les soldes
+        envelope = None
+        if transaction.type == TransactionType.EXPENSE:
+            envelope = await resolve_envelope_for_category(db, current_user.id, transaction.category_id)
+        elif transaction.type == TransactionType.INCOME:
+            envelope = await resolve_cash_envelope(db, current_user.id)
+        occurred_on = transaction.occurred_on
+
+        # 2. Supprimer les effets de distribution si c'est un revenu
         if transaction.type == TransactionType.INCOME:
             await clear_income_distribution_effects(
                 db,
@@ -279,4 +358,18 @@ async def delete_transaction(
             .values(transaction_id=None)
         )
         await db.delete(transaction)
+
+        # 3. Propager les soldes pour l'enveloppe orpheline
+        if envelope is not None:
+            anchor_date = await resolve_user_sweep_anchor_date(db, current_user)
+            period = await get_or_create_envelope_period(
+                db,
+                current_user.id,
+                envelope.id,
+                occurred_on,
+                current_user.sweep_interval_days,
+                anchor_date,
+            )
+            await propagate_period_balances(db, current_user.id, envelope.id, period.period_start)
+
     await db.commit()

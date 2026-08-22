@@ -78,7 +78,7 @@ def create_income(client: TestClient, category_id: str, amount: str) -> dict:
 
 def envelope_closing_balance(dashboard: dict, envelope_name: str) -> Decimal:
     for item in dashboard["envelopes"]:
-        if item["envelope"]["name"] == envelope_name:
+        if item["envelope"]["name"].strip().lower() == envelope_name.strip().lower():
             return Decimal(str(item["balance"]["closing_balance"]))
     raise AssertionError(f"Envelope not found: {envelope_name}")
 
@@ -380,3 +380,198 @@ def test_apply_next_cycle_uses_effective_fixed_rules_when_config_has_no_fixed_ro
         if row.get("enabled") and row.get("mode") == "fixed"
     ]
     assert fixed_rows
+
+
+def test_income_distribution_percent_under_100_multi_rules(client: TestClient) -> None:
+    create_user(client, "dist-percent-under-100@example.com")
+    food = create_envelope(client, "Food")
+    savings = create_envelope(client, "Savings")
+    fun = create_envelope(client, "Fun")
+    salary = create_category(client, "Salary")
+    set_auto_distribution(client, True)
+
+    create_rule(
+        client,
+        target_type="envelope",
+        target_id=food["id"],
+        mode="percent",
+        percent="10",
+        rank=1,
+    )
+    create_rule(
+        client,
+        target_type="envelope",
+        target_id=savings["id"],
+        mode="percent",
+        percent="30",
+        rank=2,
+    )
+    create_rule(
+        client,
+        target_type="envelope",
+        target_id=fun["id"],
+        mode="percent",
+        percent="10",
+        rank=3,
+    )
+
+    create_income(client, salary["id"], "1000.00")
+
+    dashboard = client.get("/dashboard").json()
+    # 50% distributed, so cash_balance should have 500.00 remaining
+    assert Decimal(str(dashboard["cash_balance"])) == Decimal("500.00")
+    assert envelope_closing_balance(dashboard, "Food") == Decimal("100.00")
+    assert envelope_closing_balance(dashboard, "Savings") == Decimal("300.00")
+    assert envelope_closing_balance(dashboard, "Fun") == Decimal("100.00")
+
+
+def test_saved_config_rejects_percent_total_over_100(client: TestClient) -> None:
+    create_user(client, "dist-config-over-100@example.com")
+    savings = create_envelope(client, "Savings")
+    fun = create_envelope(client, "Fun")
+
+    response = client.post(
+        "/distribution/configs",
+        json={
+            "name": "over-100",
+            "auto_enabled": True,
+            "percent_mode": "equal",
+            "rows": [
+                {
+                    "target_type": "envelope",
+                    "target_id": savings["id"],
+                    "mode": "percent",
+                    "enabled": True,
+                    "percent": "70",
+                    "rank": 1,
+                },
+                {
+                    "target_type": "envelope",
+                    "target_id": fun["id"],
+                    "mode": "percent",
+                    "enabled": True,
+                    "percent": "70",
+                    "rank": 2,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "DISTRIBUTION_PERCENT_TOTAL_EXCEEDS_100"
+
+
+def test_saved_config_accepts_percent_total_at_100(client: TestClient) -> None:
+    create_user(client, "dist-config-exact-100@example.com")
+    savings = create_envelope(client, "Savings")
+    fun = create_envelope(client, "Fun")
+
+    response = client.post(
+        "/distribution/configs",
+        json={
+            "name": "exact-100",
+            "auto_enabled": True,
+            "percent_mode": "equal",
+            "rows": [
+                {
+                    "target_type": "envelope",
+                    "target_id": savings["id"],
+                    "mode": "percent",
+                    "enabled": True,
+                    "percent": "60",
+                    "rank": 1,
+                },
+                {
+                    "target_type": "envelope",
+                    "target_id": fun["id"],
+                    "mode": "percent",
+                    "enabled": True,
+                    "percent": "40",
+                    "rank": 2,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_saved_config_ignores_disabled_rows_in_percent_total(client: TestClient) -> None:
+    create_user(client, "dist-config-disabled-row@example.com")
+    savings = create_envelope(client, "Savings")
+    fun = create_envelope(client, "Fun")
+
+    response = client.post(
+        "/distribution/configs",
+        json={
+            "name": "disabled-row",
+            "auto_enabled": True,
+            "percent_mode": "equal",
+            "rows": [
+                {
+                    "target_type": "envelope",
+                    "target_id": savings["id"],
+                    "mode": "percent",
+                    "enabled": True,
+                    "percent": "70",
+                    "rank": 1,
+                },
+                {
+                    "target_type": "envelope",
+                    "target_id": fun["id"],
+                    "mode": "percent",
+                    "enabled": False,
+                    "percent": "70",
+                    "rank": 2,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_income_creation_does_not_distribute_when_auto_distribution_disabled(
+    client: TestClient,
+) -> None:
+    create_user(client, "dist-creation-flag-disabled@example.com")
+    savings = create_envelope(client, "Savings")
+    salary = create_category(client, "Salary")
+    # auto_distribution_enabled defaults to False — never enabled here on purpose.
+
+    create_rule(
+        client,
+        target_type="envelope",
+        target_id=savings["id"],
+        mode="percent",
+        percent="50",
+        rank=1,
+    )
+
+    create_income(client, salary["id"], "1000.00")
+
+    dashboard = client.get("/dashboard").json()
+    assert Decimal(str(dashboard["cash_balance"])) == Decimal("1000.00")
+    assert envelope_closing_balance(dashboard, "Savings") == Decimal("0.00")
+
+
+def test_income_creation_distributes_once_auto_distribution_enabled(
+    client: TestClient,
+) -> None:
+    create_user(client, "dist-creation-flag-enabled@example.com")
+    savings = create_envelope(client, "Savings")
+    salary = create_category(client, "Salary")
+    set_auto_distribution(client, True)
+
+    create_rule(
+        client,
+        target_type="envelope",
+        target_id=savings["id"],
+        mode="percent",
+        percent="100",
+        rank=1,
+    )
+
+    create_income(client, salary["id"], "1000.00")
+
+    dashboard = client.get("/dashboard").json()
+    assert Decimal(str(dashboard["cash_balance"])) == Decimal("0.00")
+    assert envelope_closing_balance(dashboard, "Savings") == Decimal("1000.00")
+

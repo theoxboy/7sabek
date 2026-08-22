@@ -317,3 +317,81 @@ def test_spending_by_envelope_ignores_virtual_parent_envelopes(
     )
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_dashboard_first_income_declaration_flow(client: TestClient, database_url: str) -> None:
+    from uuid import uuid4
+    from tests.onboarding_v2_apply_test_support import build_answers
+    suffix = uuid4().hex
+    email = f"bootstrap-flow-{suffix}@example.com"
+    
+    # Register user
+    user = register_user(client, email)
+    
+    # Seed onboarding record
+    answers = build_answers(include_explicit_envelope_answers=True)
+    answers["S2a_salary_amount"] = "0"
+    # Put latest record
+    put_response = client.put(
+        "/users/me/onboarding-v2-records/latest",
+        json={
+            "flow_version": "v2",
+            "stage": "review",
+            "answers": answers,
+            "draft_objects": {},
+        },
+    )
+    assert put_response.status_code == 200
+    
+    # Apply latest record to complete onboarding
+    apply_response = client.post("/users/me/onboarding-v2-records/latest/apply")
+    assert apply_response.status_code == 200
+    
+    # Check dashboard alerts: needs_first_income_declaration should be True
+    alerts_response = client.get("/dashboard/alerts")
+    assert alerts_response.status_code == 200
+    alerts = alerts_response.json()
+    assert alerts["sweep_bootstrap"] is not None
+    assert alerts["sweep_bootstrap"]["needs_first_income_declaration"] is True
+    
+    # Get user categories to find a valid primary income category
+    categories_response = client.get("/categories")
+    assert categories_response.status_code == 200
+    categories = categories_response.json()
+    
+    from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS_SQL
+    income_category = None
+    for cat in categories:
+        if cat["name"] in INTERNAL_INCOME_CATEGORY_KEYS_SQL:
+            income_category = cat
+            break
+    
+    assert income_category is not None, "A primary income category must exist"
+    
+    # Declare first income transaction
+    today = date.today()
+    tx_response = client.post(
+        "/transactions",
+        json={
+            "type": "income",
+            "category_id": income_category["id"],
+            "amount": "6000.00",
+            "occurred_on": today.isoformat(),
+            "description": "Salaire initial",
+        },
+    )
+    assert tx_response.status_code == 201
+    
+    # Reload dashboard alerts (which triggers resolve_user_sweep_anchor_date and updates payload)
+    alerts_response_2 = client.get("/dashboard/alerts")
+    assert alerts_response_2.status_code == 200
+    alerts_2 = alerts_response_2.json()
+    
+    # It should have updated needs_first_income_declaration to False
+    assert alerts_2["sweep_bootstrap"]["needs_first_income_declaration"] is False
+    
+    # Call dashboard alerts again to make sure it STAYS False (no mutated updated_at regressions)
+    alerts_response_3 = client.get("/dashboard/alerts")
+    assert alerts_response_3.status_code == 200
+    alerts_3 = alerts_response_3.json()
+    assert alerts_3["sweep_bootstrap"]["needs_first_income_declaration"] is False

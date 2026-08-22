@@ -48,8 +48,8 @@ def clean_db() -> None:
 
 @pytest.mark.asyncio
 async def test_migration_upgrade_creates_advisor_previews_table(alembic_cfg, database_url: str) -> None:
-    alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
-    alembic_upgrade(alembic_cfg, "head")
+    await alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
+    await alembic_upgrade(alembic_cfg, "head")
 
     engine = make_async_engine(database_url)
     try:
@@ -60,8 +60,8 @@ async def test_migration_upgrade_creates_advisor_previews_table(alembic_cfg, dat
 
 @pytest.mark.asyncio
 async def test_migration_upgrade_has_required_columns(alembic_cfg, database_url: str) -> None:
-    alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
-    alembic_upgrade(alembic_cfg, "head")
+    await alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
+    await alembic_upgrade(alembic_cfg, "head")
 
     engine = make_async_engine(database_url)
     try:
@@ -94,8 +94,8 @@ async def test_migration_upgrade_has_required_columns(alembic_cfg, database_url:
 
 @pytest.mark.asyncio
 async def test_migration_upgrade_has_required_indexes(alembic_cfg, database_url: str) -> None:
-    alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
-    alembic_upgrade(alembic_cfg, "head")
+    await alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
+    await alembic_upgrade(alembic_cfg, "head")
 
     engine = make_async_engine(database_url)
     try:
@@ -114,8 +114,8 @@ async def test_migration_upgrade_has_required_indexes(alembic_cfg, database_url:
 
 @pytest.mark.asyncio
 async def test_migration_upgrade_allows_minimal_preview_insert(alembic_cfg, database_url: str) -> None:
-    alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
-    alembic_upgrade(alembic_cfg, "head")
+    await alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
+    await alembic_upgrade(alembic_cfg, "head")
 
     engine = make_async_engine(database_url)
     try:
@@ -127,8 +127,8 @@ async def test_migration_upgrade_allows_minimal_preview_insert(alembic_cfg, data
 
 @pytest.mark.asyncio
 async def test_migration_enforces_unique_preview_id(alembic_cfg, database_url: str) -> None:
-    alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
-    alembic_upgrade(alembic_cfg, "head")
+    await alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
+    await alembic_upgrade(alembic_cfg, "head")
 
     engine = make_async_engine(database_url)
     try:
@@ -142,8 +142,8 @@ async def test_migration_enforces_unique_preview_id(alembic_cfg, database_url: s
 
 @pytest.mark.asyncio
 async def test_migration_downgrade_drops_advisor_previews_table(alembic_cfg, database_url: str) -> None:
-    alembic_upgrade(alembic_cfg, "head")
-    alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
+    await alembic_upgrade(alembic_cfg, "head")
+    await alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
 
     engine = make_async_engine(database_url)
     try:
@@ -154,9 +154,9 @@ async def test_migration_downgrade_drops_advisor_previews_table(alembic_cfg, dat
 
 @pytest.mark.asyncio
 async def test_migration_round_trip_succeeds(alembic_cfg, database_url: str) -> None:
-    alembic_upgrade(alembic_cfg, "head")
-    alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
-    alembic_upgrade(alembic_cfg, "head")
+    await alembic_upgrade(alembic_cfg, "head")
+    await alembic_downgrade(alembic_cfg, PREVIOUS_REVISION)
+    await alembic_upgrade(alembic_cfg, "head")
 
     engine = make_async_engine(database_url)
     try:

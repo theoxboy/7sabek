@@ -25,11 +25,14 @@ from app.schemas.advisor.api import (
     AdvisorAcceptOut,
     AdvisorAcceptRequestIn,
     AdvisorApiError,
+    AdvisorChatRequestIn,
+    AdvisorChatResponseOut,
     AdvisorErrorOut,
     AdvisorPreviewEnvelopeOut,
     AdvisorPreviewRequestIn,
     AdvisorValidatePreApplyOut,
     AdvisorValidatePreApplyRequestIn,
+    ChatMessageIn,
     PostAdvisorAcceptRequest,
     PostAdvisorPreviewRequest,
     PostAdvisorPreviewResponse,
@@ -72,4 +75,8 @@ __all__ = [
     "AdvisorAcceptRequestIn",
     "AdvisorAcceptOut",
     "AdvisorErrorOut",
+    # Chat schemas
+    "ChatMessageIn",
+    "AdvisorChatRequestIn",
+    "AdvisorChatResponseOut",
 ]

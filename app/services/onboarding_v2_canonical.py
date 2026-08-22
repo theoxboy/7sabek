@@ -1761,7 +1761,15 @@ def compute_canonical_apply_state_backend(
         item for item in cycle_normalized_expenses if item.get("priority_layer") == "planned_future_obligation"
     ]
     minimum_debt_per_cycle = _round_amount(sum(float(item.get("payment_per_cycle") or 0.0) for item in debts))
-    reserve_per_cycle = _round_amount(float(debt_reality.get("reserve_per_cycle") or 0.0))
+    planned_reserve_raw = answers.get("F1_guidance_planned_reserve")
+    has_planned_reserve = not (
+        planned_reserve_raw is None
+        or (isinstance(planned_reserve_raw, str) and not planned_reserve_raw.strip())
+    )
+    if has_planned_reserve:
+        reserve_per_cycle = _round_amount(max(0.0, _to_number(planned_reserve_raw)))
+    else:
+        reserve_per_cycle = _round_amount(float(debt_reality.get("reserve_per_cycle") or 0.0))
     income_per_cycle = _to_cycle_amount(float(sanity.get("incomeEstimate") or 0.0), answers)
     protected_expenses_per_cycle = _round_amount(
         sum(float(item.get("per_cycle_amount") or 0.0) for item in protected_expenses)
@@ -1814,7 +1822,7 @@ def compute_canonical_apply_state_backend(
         "cadence_label": _get_cadence_label(answers),
         "realistic_capacity_per_cycle": debt_reality.get("realistic_capacity_per_cycle"),
         "realistic_capacity_monthly": debt_reality.get("realistic_capacity_monthly"),
-        "reserve_per_cycle": debt_reality.get("reserve_per_cycle"),
+        "reserve_per_cycle": reserve_per_cycle,
         "required_per_cycle": debt_reality.get("required_per_cycle"),
         "required_monthly": debt_reality.get("required_monthly"),
         "suggested_extra_per_cycle": suggested_debt_extra_per_cycle,

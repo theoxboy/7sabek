@@ -52,6 +52,7 @@ DEFAULT_PLATFORM_SETTINGS = {
         "fallback_gateway_ids": [],
         "request_timeout_ms": 60000,
     },
+    "advisor_global_instructions": "",
     "rate_limit_login_max": 10,
     "rate_limit_login_window_minutes": 10,
     "rate_limit_register_max": 5,
@@ -222,6 +223,11 @@ class PlatformSettings(Base):
         JSON,
         nullable=False,
         default=DEFAULT_PLATFORM_SETTINGS["ai_routing"],
+    )
+    advisor_global_instructions: Mapped[str] = mapped_column(
+        String(2000),
+        nullable=False,
+        default=DEFAULT_PLATFORM_SETTINGS["advisor_global_instructions"],
     )
     rate_limit_login_max: Mapped[int] = mapped_column(
         Integer,

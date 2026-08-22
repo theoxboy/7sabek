@@ -13,6 +13,7 @@ from app.db.session import get_db
 from app.models import (
     CategoryEnvelopeMap,
     DistributionItem,
+    DistributionRule,
     DistributionSavedConfig,
     Envelope,
     EnvelopeAdjustmentLog,
@@ -140,6 +141,14 @@ async def create_envelope(
         name=normalized_name,
         rollover_enabled=payload.rollover_enabled,
     )
+    if is_rollover_off_forbidden_envelope(envelope):
+        if not payload.rollover_enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="ENVELOPE_ROLLOVER_OFF_FORBIDDEN_FOR_PROFILE",
+            )
+        envelope.rollover_enabled = True
+
     db.add(envelope)
     await db.commit()
     await db.refresh(envelope)
@@ -208,17 +217,18 @@ async def update_envelope(
             )
         if envelope.is_cash:
             raise HTTPException(status_code=400, detail="ENVELOPE_CASH_ROLLOVER_FIXED")
+        envelope.rollover_enabled = payload.rollover_enabled
+
+    # Final validation on envelope
+    if not envelope.rollover_enabled and not envelope.is_cash and not envelope.is_default_savings:
         fixed_active = await _has_active_fixed_distribution_for_envelope(
             db, current_user.id, envelope.id
         )
-        if payload.rollover_enabled is False and (
-            is_rollover_off_forbidden_envelope(envelope) or fixed_active
-        ):
+        if is_rollover_off_forbidden_envelope(envelope) or fixed_active:
             raise HTTPException(
                 status_code=400,
                 detail="ENVELOPE_ROLLOVER_OFF_FORBIDDEN_FOR_PROFILE",
             )
-        envelope.rollover_enabled = payload.rollover_enabled
 
     await db.commit()
     await db.refresh(envelope)
@@ -249,6 +259,22 @@ async def delete_envelope(
         delete(CategoryEnvelopeMap).where(
             CategoryEnvelopeMap.user_id == current_user.id,
             CategoryEnvelopeMap.envelope_id == envelope.id,
+        )
+    )
+
+    await db.execute(
+        delete(DistributionRule).where(
+            DistributionRule.user_id == current_user.id,
+            DistributionRule.target_type == "envelope",
+            DistributionRule.target_id == envelope.id,
+        )
+    )
+
+    await db.execute(
+        delete(DistributionItem).where(
+            DistributionItem.user_id == current_user.id,
+            DistributionItem.target_type == "envelope",
+            DistributionItem.target_id == envelope.id,
         )
     )
 

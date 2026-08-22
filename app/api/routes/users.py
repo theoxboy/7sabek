@@ -589,16 +589,6 @@ async def upsert_my_latest_onboarding_v2_record(
         "answers": answers,
         "draft_objects": draft_objects,
     }
-    stage = coerce_record_stage_for_write(
-        payload.stage or "in_progress",
-        payload=record_payload,
-    )
-    record_payload = _merge_onboarding_payload_materialized_state(
-        record_payload,
-        {},
-        applied=False,
-        workflow_stage=stage,
-    )
     result = await db.execute(
         select(OnboardingV2Record)
         .where(OnboardingV2Record.user_id == current_user.id)
@@ -606,6 +596,38 @@ async def upsert_my_latest_onboarding_v2_record(
         .limit(1)
     )
     record = result.scalar_one_or_none()
+
+    is_already_completed = False
+    existing_summary = {}
+    existing_applied_at = None
+    if record and isinstance(record.payload, dict):
+        materialized_state = record.payload.get("materialized_state")
+        if isinstance(materialized_state, dict):
+            is_already_completed = materialized_state.get("applied") is True
+            existing_summary = materialized_state.get("summary") or {}
+            existing_applied_at = materialized_state.get("applied_at")
+
+    if is_already_completed:
+        stage = "completed"
+        is_applied = True
+        summary_to_merge = existing_summary
+    else:
+        stage = coerce_record_stage_for_write(
+            payload.stage or "in_progress",
+            payload=record_payload,
+        )
+        is_applied = False
+        summary_to_merge = {}
+
+    record_payload = _merge_onboarding_payload_materialized_state(
+        record_payload,
+        summary_to_merge,
+        applied=is_applied,
+        workflow_stage=stage,
+    )
+    if is_already_completed and existing_applied_at:
+        record_payload["materialized_state"]["applied_at"] = existing_applied_at
+
     if record is None:
         record = OnboardingV2Record(
             user_id=current_user.id,
@@ -665,12 +687,13 @@ async def apply_my_latest_onboarding_v2_record(
         payload.get("draft_objects") if isinstance(payload.get("draft_objects"), dict) else {}
     )
     try:
-        summary = await apply_onboarding_v2_payload(
-            db,
-            current_user,
-            answers=answers,
-            draft_objects=draft_objects,
-        )
+        async with db.begin_nested():
+            summary = await apply_onboarding_v2_payload(
+                db,
+                current_user,
+                answers=answers,
+                draft_objects=draft_objects,
+            )
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {}
         if detail.get("code") != "ONBOARDING_APPLY_PRECONDITIONS_FAILED":

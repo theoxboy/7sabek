@@ -5,6 +5,7 @@ from decimal import Decimal
 from hashlib import sha1
 from collections import defaultdict
 import json
+import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
@@ -16,11 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models import (
+    Category,
     DistributionItem,
     DistributionSavedConfig,
     DistributionRule,
     Envelope,
     EnvelopePeriod,
+    EnvelopeMovement,
     Goal,
     OnboardingV2Record,
     Transaction,
@@ -68,9 +71,11 @@ from app.services.onboarding_v2_canonical import compute_canonical_apply_state_b
 from app.services.onboarding_v2_record_state import normalize_record_payload_for_response
 from app.services.periods import period_bounds
 from app.services.sweep_context import resolve_user_sweep_anchor_date
+from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS_SQL
 from app.services.transactions import resolve_cash_envelope
 
 router = APIRouter(prefix="/distribution")
+logger = logging.getLogger(__name__)
 
 
 async def _lock_user_distribution_row(
@@ -150,6 +155,7 @@ def _serialize_saved_rows(rows: list[DistributionSavedRowIn]) -> list[dict[str, 
 
 
 def _validate_saved_rows(rows: list[DistributionSavedRowIn]) -> None:
+    percent_total = Decimal("0.00")
     for row in rows:
         if row.mode == "none":
             continue
@@ -164,7 +170,15 @@ def _validate_saved_rows(rows: list[DistributionSavedRowIn]) -> None:
                 raise HTTPException(status_code=400, detail="percent row requires percent")
             if row.fixed_amount is not None:
                 raise HTTPException(status_code=400, detail="percent row cannot include fixed_amount")
+            if row.enabled:
+                percent_total += Decimal(str(row.percent))
             continue
+
+    if percent_total > Decimal("100.00"):
+        raise HTTPException(
+            status_code=400,
+            detail="DISTRIBUTION_PERCENT_TOTAL_EXCEEDS_100",
+        )
 
 
 def _to_saved_config_out(
@@ -180,6 +194,10 @@ def _to_saved_config_out(
         try:
             row = DistributionSavedRowOut.model_validate(item)
         except Exception:
+            logger.warning(
+                "distribution_saved_row_parse_failed config_id=%s user_id=%s item=%r",
+                config.id, config.user_id, item,
+            )
             continue
         if row.target_type == "envelope":
             row.name = envelope_name_by_id.get(row.target_id)
@@ -298,11 +316,14 @@ async def _is_sweep_due_now(db: AsyncSession, current_user: User, today: date) -
     if current_end > today:
         return False
     income_count_result = await db.execute(
-        select(func.count(Transaction.id)).where(
+        select(func.count(Transaction.id))
+        .join(Category, Transaction.category_id == Category.id)
+        .where(
             Transaction.user_id == current_user.id,
+            Transaction.type == TransactionType.INCOME,
+            Category.name.in_(INTERNAL_INCOME_CATEGORY_KEYS_SQL),
             Transaction.occurred_on >= current_start,
             Transaction.occurred_on < current_end,
-            Transaction.type == TransactionType.INCOME,
         )
     )
     income_declared = int(income_count_result.scalar_one()) > 0
@@ -344,6 +365,10 @@ async def _apply_saved_rows_to_distribution_rules(
         try:
             return Decimal(str(value)).quantize(Decimal("0.01"))
         except Exception:
+            logger.warning(
+                "distribution_amount_parse_failed user_id=%s value=%r",
+                current_user.id, value,
+            )
             return None
 
     envelopes_result = await db.execute(
@@ -1020,6 +1045,10 @@ async def set_active_saved_distribution_config(
             try:
                 rows.append(DistributionSavedRowIn.model_validate(item))
             except Exception:
+                logger.warning(
+                    "distribution_saved_row_parse_failed config_id=%s user_id=%s item=%r",
+                    config.id, current_user.id, item,
+                )
                 continue
     await _apply_saved_rows_to_distribution_rules(db, current_user, rows=rows)
     await db.commit()
@@ -1085,6 +1114,10 @@ async def delete_saved_distribution_config(
                     try:
                         rows.append(DistributionSavedRowIn.model_validate(item))
                     except Exception:
+                        logger.warning(
+                            "distribution_saved_row_parse_failed config_id=%s user_id=%s item=%r",
+                            replacement.id, current_user.id, item,
+                        )
                         continue
             await _apply_saved_rows_to_distribution_rules(db, current_user, rows=rows)
 
@@ -1141,6 +1174,10 @@ async def preview_saved_distribution_rebalance(
         try:
             rows.append(DistributionSavedRowIn.model_validate(item))
         except Exception:
+            logger.warning(
+                "distribution_saved_row_parse_failed config_id=%s user_id=%s item=%r",
+                config.id, current_user.id, item,
+            )
             continue
     fixed_rows = await _load_effective_fixed_rows_for_rebalance(
         db,
@@ -1227,6 +1264,10 @@ async def apply_saved_distribution_next_cycle(
         try:
             base_rows.append(DistributionSavedRowIn.model_validate(item))
         except Exception:
+            logger.warning(
+                "distribution_saved_row_parse_failed config_id=%s user_id=%s item=%r",
+                base_config.id, current_user.id, item,
+            )
             continue
     fixed_rows = await _load_effective_fixed_rows_for_rebalance(
         db,
@@ -1454,6 +1495,10 @@ async def revert_saved_distribution_to_onboarding_baseline(
         try:
             rows.append(DistributionSavedRowIn.model_validate(item))
         except Exception:
+            logger.warning(
+                "distribution_saved_row_parse_failed config_id=%s user_id=%s item=%r",
+                baseline.id, current_user.id, item,
+            )
             continue
     await _apply_saved_rows_to_distribution_rules(db, current_user, rows=rows)
     await db.commit()
@@ -1490,6 +1535,7 @@ async def get_distribution_onboarding_status(
         "goals",
         "emergency_buffer",
         "balance_buffer",
+        "free_balance",
     }
     eligible_names_payload = [
         name.strip() for name in payload.eligible_envelope_names if name.strip()
@@ -1508,33 +1554,46 @@ async def get_distribution_onboarding_status(
         for envelope_id in payload.eligible_envelope_ids
         if envelope_id in valid_envelope_ids
     ]
+    latest_record_result = await db.execute(
+        select(OnboardingV2Record)
+        .where(OnboardingV2Record.user_id == current_user.id)
+        .order_by(OnboardingV2Record.created_at.desc())
+        .limit(1)
+    )
+    latest_record = latest_record_result.scalar_one_or_none()
+
+    draft_envelope_keys: Set[str] = set()
+    answers = {}
+    if latest_record is not None and isinstance(latest_record.payload, dict):
+        normalized_payload, _ = normalize_record_payload_for_response(
+            latest_record.payload,
+            stored_workflow_stage=latest_record.stage,
+        )
+        answers = (
+            normalized_payload.get("answers")
+            if isinstance(normalized_payload.get("answers"), dict)
+            else {}
+        )
+        if answers:
+            selected = answers.get("E11_selected_envelopes_v1", [])
+            if isinstance(selected, list):
+                for item in selected:
+                    if isinstance(item, dict):
+                        name = item.get("final_name") or item.get("name")
+                        if name:
+                            k = distribution_name_equivalent_key(name)
+                            if k:
+                                draft_envelope_keys.add(k)
+
     explicit_scope_present = bool(eligible_names_payload or eligible_ids_payload or eligible_keys_payload)
     canonical_eligible_names: List[str] = []
-    if not explicit_scope_present:
-        latest_record_result = await db.execute(
-            select(OnboardingV2Record)
-            .where(OnboardingV2Record.user_id == current_user.id)
-            .order_by(OnboardingV2Record.created_at.desc())
-            .limit(1)
-        )
-        latest_record = latest_record_result.scalar_one_or_none()
-        if latest_record is not None and isinstance(latest_record.payload, dict):
-            normalized_payload, _ = normalize_record_payload_for_response(
-                latest_record.payload,
-                stored_workflow_stage=latest_record.stage,
-            )
-            answers = (
-                normalized_payload.get("answers")
-                if isinstance(normalized_payload.get("answers"), dict)
-                else {}
-            )
-            if answers:
-                canonical_state = compute_canonical_apply_state_backend(answers)
-                canonical_eligible_names = [
-                    name.strip()
-                    for name in canonical_state.distribution_eligible_names
-                    if isinstance(name, str) and name.strip()
-                ]
+    if not explicit_scope_present and answers:
+        canonical_state = compute_canonical_apply_state_backend(answers)
+        canonical_eligible_names = [
+            name.strip()
+            for name in canonical_state.distribution_eligible_names
+            if isinstance(name, str) and name.strip()
+        ]
     eligible_names = eligible_names_payload or canonical_eligible_names
 
     active_result = await db.execute(
@@ -1562,6 +1621,10 @@ async def get_distribution_onboarding_status(
             try:
                 target_id = UUID(str(target_id_raw))
             except Exception:
+                logger.warning(
+                    "distribution_saved_row_parse_failed config_id=%s user_id=%s item=%r",
+                    active_config.id, current_user.id, item,
+                )
                 continue
             covered_ids.add(target_id)
             if mode == "fixed":
@@ -1575,10 +1638,10 @@ async def get_distribution_onboarding_status(
             if (
                 rule.target_type == "envelope"
                 and rule.enabled
-                and rule.mode in {"fixed_per_period", "percent_of_income"}
+                and rule.mode in {"fixed", "fixed_per_period", "percent", "percent_of_income"}
             ):
                 covered_ids.add(rule.target_id)
-                if rule.mode == "fixed_per_period":
+                if rule.mode in {"fixed", "fixed_per_period"}:
                     fixed_mode_ids.add(rule.target_id)
         if covered_ids:
             source = "legacy_rules"
@@ -1589,6 +1652,8 @@ async def get_distribution_onboarding_status(
         if env_id in envelope_key_by_id
     }
     non_target_keys = excluded_scope_keys
+
+    physical_envelopes_exist = bool(envelope_name_by_id)
 
     resolved_scoped_ids: Set[UUID] = set()
     if eligible_ids_payload:
@@ -1605,6 +1670,19 @@ async def get_distribution_onboarding_status(
 
     unresolved_envelope_names: List[str] = []
     ignored_non_target_names: List[str] = []
+    eligible_keys: Set[str] = set()
+    scoped_target_names: List[str] = []
+    seen_scoped_keys: Set[str] = set()
+
+    for env_id in resolved_scoped_ids:
+        k = envelope_key_by_id.get(env_id)
+        if k and k not in non_target_keys and k not in fixed_mode_keys:
+            eligible_keys.add(k)
+            name = envelope_name_by_id.get(env_id)
+            if name and k not in seen_scoped_keys:
+                scoped_target_names.append(name)
+                seen_scoped_keys.add(k)
+
     for name in eligible_names:
         key = distribution_name_equivalent_key(name)
         if not key:
@@ -1612,22 +1690,32 @@ async def get_distribution_onboarding_status(
         if key in non_target_keys or key in fixed_mode_keys:
             ignored_non_target_names.append(name)
             continue
+
         matching_ids = envelope_ids_by_key.get(key, set())
-        if not matching_ids:
+        is_resolved = (
+            (not physical_envelopes_exist)
+            or bool(matching_ids)
+            or (key in draft_envelope_keys)
+        )
+
+        if not is_resolved:
             unresolved_envelope_names.append(name)
             continue
-        resolved_scoped_ids.update(matching_ids)
 
-    eligible_keys: Set[str] = {
-        envelope_key_by_id[env_id]
-        for env_id in resolved_scoped_ids
-        if env_id in envelope_key_by_id
-    }
-    scoped_target_names = [
-        envelope_name_by_id[env_id]
-        for env_id in resolved_scoped_ids
-        if env_id in envelope_name_by_id
-    ]
+        if matching_ids:
+            resolved_scoped_ids.update(matching_ids)
+            for env_id in matching_ids:
+                k = envelope_key_by_id.get(env_id)
+                if k and k not in seen_scoped_keys:
+                    eligible_keys.add(k)
+                    scoped_target_names.append(envelope_name_by_id[env_id])
+                    seen_scoped_keys.add(k)
+        else:
+            if key not in seen_scoped_keys:
+                eligible_keys.add(key)
+                scoped_target_names.append(name)
+                seen_scoped_keys.add(key)
+
     eligible_total = len(eligible_keys)
     unresolved_total = len(unresolved_envelope_names)
 
@@ -1902,7 +1990,7 @@ async def simulate_distribution(
             item.amount
             for item in plan
             if rule_lookup.get(item.rule_id)
-            and rule_lookup[item.rule_id].mode == "fixed_per_period"
+            and rule_lookup[item.rule_id].mode in {"fixed", "fixed_per_period"}
         ),
         Decimal("0.00"),
     )
@@ -1914,7 +2002,7 @@ async def simulate_distribution(
         (
             Decimal(str(rule.amount or 0))
             for rule in rules
-            if rule.enabled and rule.mode == "fixed_per_period"
+            if rule.enabled and rule.mode in {"fixed", "fixed_per_period"}
             and (not apply_income_filter or rule.auto_apply_on_income)
         ),
         Decimal("0.00"),
@@ -1926,7 +2014,7 @@ async def simulate_distribution(
         (
             Decimal(str(rule.percent or 0))
             for rule in rules
-            if rule.enabled and rule.mode == "percent_of_income"
+            if rule.enabled and rule.mode in {"percent", "percent_of_income"}
             and (not apply_income_filter or rule.auto_apply_on_income)
         ),
         Decimal("0.00"),
@@ -1938,7 +2026,7 @@ async def simulate_distribution(
         rule
         for rule in rules
         if rule.enabled
-        and rule.mode in {"fixed_per_period", "percent_of_income"}
+        and rule.mode in {"fixed", "fixed_per_period", "percent", "percent_of_income"}
         and (not apply_income_filter or rule.auto_apply_on_income)
     ]
 
@@ -1985,9 +2073,9 @@ async def simulate_distribution(
                 "target_type": rule.target_type,
                 "target_id": rule.target_id,
                 "name": rule_name,
-                "mode": "fixed" if rule.mode == "fixed_per_period" else "percent",
+                "mode": "fixed" if rule.mode in {"fixed", "fixed_per_period"} else "percent",
                 "amount": plan_amount_by_rule.get(rule.id, Decimal("0.00")),
-                "fixed_priority": rule.priority if rule.mode == "fixed_per_period" else None,
+                "fixed_priority": rule.priority if rule.mode in {"fixed", "fixed_per_period"} else None,
             }
         )
 

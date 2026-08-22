@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -43,6 +43,7 @@ from app.services.sweep_context import (
     build_sweep_bootstrap_status,
     resolve_user_sweep_anchor_date,
 )
+from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS_SQL
 from app.services.envelope_virtual import is_virtual_parent_envelope_name
 from app.services.category_mapping_integrity import ensure_system_category_mappings
 from app.services.category_unmapped import count_manual_unmapped_categories
@@ -216,9 +217,12 @@ async def _sweep_status_for_range(
     db: AsyncSession, current_user: User, period_start: date, period_end: date
 ) -> SweepStatusOut:
     income_result = await db.execute(
-        select(func.count(Transaction.id)).where(
+        select(func.count(Transaction.id))
+        .join(Category, Transaction.category_id == Category.id)
+        .where(
             Transaction.user_id == current_user.id,
             Transaction.type == TransactionType.INCOME,
+            Category.name.in_(INTERNAL_INCOME_CATEGORY_KEYS_SQL),
             Transaction.occurred_on >= period_start,
             Transaction.occurred_on < period_end,
         )
@@ -585,6 +589,7 @@ async def get_dashboard_alerts(
         sweep_due=sweep_status.due,
         current_period=CurrentPeriodOut(start=period_start, end=period_end),
         sweep_status=sweep_status,
+        sweep_bootstrap=await build_sweep_bootstrap_status(db, current_user),
     )
 
 

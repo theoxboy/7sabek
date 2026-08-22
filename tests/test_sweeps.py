@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Optional
+from uuid import UUID
 
 import asyncpg
 from fastapi.testclient import TestClient
@@ -311,7 +313,7 @@ def test_auto_sweep_runs_on_login_when_due(client: TestClient, database_url: str
         },
     )
     assert expense_response.status_code == 201
-    income_category = create_category(client, user["id"], "Auto Sweep Income")
+    income_category = create_category(client, user["id"], "income_general")
     income_response = client.post(
         "/transactions",
         json={
@@ -366,7 +368,7 @@ def test_auto_sweep_respects_user_toggle(client: TestClient, database_url: str) 
             "description": "Expense due period",
         },
     )
-    income_category = create_category(client, user["id"], "Auto Sweep Disabled Income")
+    income_category = create_category(client, user["id"], "income_general")
     client.post(
         "/transactions",
         json={
@@ -393,7 +395,7 @@ def test_auto_sweep_processes_due_backlog_periods(client: TestClient, database_u
 
     envelope = create_envelope(client, user["id"], "Backlog Envelope")
     expense_category = create_category(client, user["id"], "Backlog Expense")
-    income_category = create_category(client, user["id"], "Backlog Income")
+    income_category = create_category(client, user["id"], "income_general")
     map_category(client, user["id"], expense_category["id"], envelope["id"])
 
     day_one = date.today() - timedelta(days=3)
@@ -439,3 +441,257 @@ def test_auto_sweep_processes_due_backlog_periods(client: TestClient, database_u
     swept_dates = fetch_swept_on_dates(database_url, user["id"])
     assert due_end_one in swept_dates
     assert due_end_two in swept_dates
+
+
+def insert_onboarding_record(database_url: str, user_id: str, payload: dict) -> None:
+    import json
+    from uuid import uuid4
+    async def _insert() -> None:
+        conn = await asyncpg.connect(_asyncpg_url(database_url))
+        try:
+            await conn.execute(
+                """
+                INSERT INTO onboarding_v2_records (id, user_id, flow_version, stage, payload, created_at, updated_at)
+                VALUES ($1, $2, 'v2', 'completed', $3, now(), now())
+                """,
+                uuid4(),
+                UUID(user_id),
+                json.dumps(payload),
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_insert())
+
+
+def fetch_onboarding_payload(database_url: str, user_id: str) -> Optional[dict]:
+    import json
+    async def _fetch() -> Optional[dict]:
+        conn = await asyncpg.connect(_asyncpg_url(database_url))
+        try:
+            val = await conn.fetchval(
+                "SELECT payload FROM onboarding_v2_records WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+                UUID(user_id)
+            )
+            return json.loads(val) if val else None
+        finally:
+            await conn.close()
+
+    return asyncio.run(_fetch())
+
+
+def test_force_close_early_payday(client: TestClient, database_url: str) -> None:
+    from uuid import UUID
+    import json
+
+    # 1. Create a user with 30-day sweeps
+    user = create_user(client, "early-payday@example.com", sweep_days=30)
+    user_id = user["id"]
+
+    # Set anchor date to 2026-06-01
+    anchor_date = date(2026, 6, 1)
+    set_user_anchor_date(database_url, user_id, anchor_date)
+
+    # Insert onboarding record with sweep_anchor_date set to 2026-06-01
+    insert_onboarding_record(database_url, user_id, {"sweep_anchor_date": "2026-06-01"})
+
+    # Setup category and envelope
+    envelope = create_envelope(client, user_id, "Food")
+    category = create_category(client, user_id, "Food Expense")
+    map_category(client, user_id, category["id"], envelope["id"])
+
+    # Allocate some money in the standard period (2026-06-01 to 2026-07-01)
+    occurred_on = date(2026, 6, 15)
+    client.post(
+        f"/envelopes/{envelope['id']}/allocate",
+        json={"amount": "100.00", "occurred_on": occurred_on.isoformat()},
+    )
+
+    # Resolve income category (primary income like income_salary)
+    income_category = create_category(client, user_id, "income_salary")
+
+    # Post early salary income on 2026-06-25 (normally expected on 2026-07-01)
+    # Scenario A: Temporary payday shift (permanent_shift = False)
+    response = client.post(
+        "/transactions",
+        json={
+            "type": "income",
+            "category_id": income_category["id"],
+            "amount": "5000.00",
+            "occurred_on": "2026-06-25",
+            "description": "Early salary",
+            "permanent_shift": False,
+        }
+    )
+    assert response.status_code == 201
+
+    # Verify that the active period end got shifted to early_date (2026-06-25)
+    # Check that a sweep was created on 2026-06-25
+    sweeps_count = fetch_sweeps_count_for_date(database_url, user_id, date(2026, 6, 25))
+    assert sweeps_count > 0
+
+    # Under temporary shift, onboarding sweep_anchor_date must remain unchanged ("2026-06-01")
+    payload = fetch_onboarding_payload(database_url, user_id)
+    assert payload is not None
+    assert payload.get("sweep_anchor_date") == "2026-06-01"
+
+    # Now let's test a Permanent payday shift (permanent_shift = True)
+    # Create another user for isolation
+    user_perm = create_user(client, "early-payday-perm@example.com", sweep_days=30)
+    user_perm_id = user_perm["id"]
+
+    # Log in as user_perm so we can create categories/envelopes and transactions
+    from tests.utils import login_user
+    login_user(client, "early-payday-perm@example.com")
+
+    set_user_anchor_date(database_url, user_perm_id, anchor_date)
+    insert_onboarding_record(database_url, user_perm_id, {"sweep_anchor_date": "2026-06-01"})
+
+    envelope_perm = create_envelope(client, user_perm_id, "Clothes")
+    category_perm = create_category(client, user_perm_id, "Clothes Expense")
+    map_category(client, user_perm_id, category_perm["id"], envelope_perm["id"])
+
+    # Allocate some money
+    client.post(
+        f"/envelopes/{envelope_perm['id']}/allocate",
+        json={"amount": "150.00", "occurred_on": occurred_on.isoformat()},
+    )
+
+    income_category_perm = create_category(client, user_perm_id, "income_salary")
+
+    # Post early salary income on 2026-06-25 with permanent_shift = True
+    response_perm = client.post(
+        "/transactions",
+        json={
+            "type": "income",
+            "category_id": income_category_perm["id"],
+            "amount": "6000.00",
+            "occurred_on": "2026-06-25",
+            "description": "New permanent salary date",
+            "permanent_shift": True,
+        }
+    )
+    assert response_perm.status_code == 201
+
+    # Check that a sweep was created on 2026-06-25
+    sweeps_count_perm = fetch_sweeps_count_for_date(database_url, user_perm_id, date(2026, 6, 25))
+    assert sweeps_count_perm > 0
+
+    # Under permanent shift, onboarding sweep_anchor_date must be updated to "2026-06-25"
+    payload_perm = fetch_onboarding_payload(database_url, user_perm_id)
+    assert payload_perm is not None
+    assert payload_perm.get("sweep_anchor_date") == "2026-06-25"
+
+
+def insert_envelope_period_with_movement(
+    database_url: str,
+    user_id: str,
+    envelope_id: str,
+    period_start: date,
+    period_end: date,
+    amount: str,
+) -> str:
+    """Directly seed an EnvelopePeriod (+ a funding movement) whose period_start
+    diverges from another envelope's period_start, simulating two envelopes whose
+    periods were created lazily at different times — a normal occurrence."""
+    from uuid import uuid4
+
+    async def _insert() -> str:
+        conn = await asyncpg.connect(_asyncpg_url(database_url))
+        try:
+            period_id = uuid4()
+            await conn.execute(
+                """
+                INSERT INTO envelope_periods
+                    (id, user_id, envelope_id, period_start, period_end, opening_balance, created_at)
+                VALUES ($1, $2, $3, $4, $5, 0, now())
+                """,
+                period_id,
+                UUID(user_id),
+                UUID(envelope_id),
+                period_start,
+                period_end,
+            )
+            await conn.execute(
+                """
+                INSERT INTO envelope_movements
+                    (id, user_id, transaction_id, envelope_period_id, amount, created_at)
+                VALUES ($1, $2, NULL, $3, $4, now())
+                """,
+                uuid4(),
+                UUID(user_id),
+                period_id,
+                amount,
+            )
+            return str(period_id)
+        finally:
+            await conn.close()
+
+    return asyncio.run(_insert())
+
+
+def test_force_close_sweeps_every_envelope_even_with_divergent_period_start(
+    client: TestClient, database_url: str
+) -> None:
+    """Regression test: force_close_current_cycle + run_sweep(force=True) must
+    resolve period_start per envelope. Before the fix, a single period_start was
+    borrowed from an arbitrary envelope and applied to every envelope, orphaning
+    the real balance of any envelope whose active period started on a different
+    date (a normal situation since periods are created lazily)."""
+    user = create_user(client, "force-close-divergent@example.com", sweep_days=30)
+    user_id = user["id"]
+
+    anchor_date = date(2026, 6, 1)
+    set_user_anchor_date(database_url, user_id, anchor_date)
+    insert_onboarding_record(database_url, user_id, {"sweep_anchor_date": "2026-06-01"})
+
+    # Envelope A: funded through the normal flow -> period_start = 2026-06-01 (anchor-aligned).
+    envelope_a = create_envelope(client, user_id, "Rent")
+    category_a = create_category(client, user_id, "Rent Expense")
+    map_category(client, user_id, category_a["id"], envelope_a["id"])
+    client.post(
+        f"/envelopes/{envelope_a['id']}/allocate",
+        json={"amount": "100.00", "occurred_on": "2026-06-05"},
+    )
+
+    # Envelope B: its currently-active period was seeded earlier, with a
+    # deliberately different period_start (2026-05-01) than envelope A's.
+    envelope_b = create_envelope(client, user_id, "Insurance")
+    divergent_period_id = insert_envelope_period_with_movement(
+        database_url,
+        user_id,
+        envelope_b["id"],
+        period_start=date(2026, 5, 1),
+        period_end=date(2026, 7, 1),
+        amount="250.00",
+    )
+
+    income_category = create_category(client, user_id, "income_salary")
+
+    # Permanent payday shift on 2026-06-25 closes every active period (including
+    # envelope B's, whose period_start differs from envelope A's) and sweeps them.
+    response = client.post(
+        "/transactions",
+        json={
+            "type": "income",
+            "category_id": income_category["id"],
+            "amount": "1000.00",
+            "occurred_on": "2026-06-25",
+            "description": "Payday shift",
+            "permanent_shift": True,
+        },
+    )
+    assert response.status_code == 201
+
+    # Envelope B's real (pre-seeded) period must be the one swept, with its
+    # actual balance — not lost to a freshly created zero-balance phantom period.
+    swept_amount = fetch_sweep_amount(database_url, divergent_period_id)
+    assert swept_amount is not None, (
+        "envelope B's real period was never swept — its balance is orphaned"
+    )
+    assert Decimal(swept_amount) == Decimal("250.00")
+
+    # Envelope A must still be swept correctly too (no regression there).
+    sweeps_count = fetch_sweeps_count_for_date(database_url, user_id, date(2026, 6, 25))
+    assert sweeps_count >= 2
+

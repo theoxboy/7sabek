@@ -74,6 +74,7 @@ class PlatformSettingsOut(BaseModel):
     announcements: list[AnnouncementOut] = Field(default_factory=list)
     ai_gateways: list[AIGatewayOut] = Field(default_factory=list)
     ai_routing: AIRoutingOut = Field(default_factory=AIRoutingOut)
+    advisor_global_instructions: str = Field(default="", max_length=2000)
     rate_limit_login_max: int
     rate_limit_login_window_minutes: int
     rate_limit_register_max: int
@@ -110,6 +111,7 @@ class PlatformSettingsUpdate(BaseModel):
     announcements: Optional[list[AnnouncementOut]] = None
     ai_gateways: Optional[list[AIGatewayOut]] = None
     ai_routing: Optional[AIRoutingOut] = None
+    advisor_global_instructions: Optional[str] = Field(default=None, max_length=2000)
     rate_limit_login_max: Optional[int] = Field(default=None, ge=0, le=1000)
     rate_limit_login_window_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
     rate_limit_register_max: Optional[int] = Field(default=None, ge=0, le=1000)

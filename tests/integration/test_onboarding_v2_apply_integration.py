@@ -140,7 +140,7 @@ def test_apply_endpoint_matches_legacy_and_modern_onboarding_records(
     modern_email = f"modern-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, legacy_email, currency="MAD", sweep_interval_days=30)
 
         _put_latest_record(
@@ -190,7 +190,7 @@ def test_apply_endpoint_matches_legacy_and_modern_onboarding_records(
 
             envelopes_result = await db.execute(select(Envelope).order_by(Envelope.name.asc()))
             envelopes = list(envelopes_result.scalars().all())
-            assert any(envelope.name == "Loyer" for envelope in envelopes)
+            assert any(envelope.name == "loyer" for envelope in envelopes)
 
             goals_result = await db.execute(select(Goal).order_by(Goal.name.asc()))
             goals = list(goals_result.scalars().all())
@@ -219,7 +219,7 @@ def test_latest_record_storage_normalizes_legacy_answer_bridges_and_progress_sna
     email = f"normalize-write-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
         _put_latest_record(client, answers=answers, draft_objects=draft_objects)
 
@@ -297,7 +297,7 @@ def test_latest_record_storage_distinguishes_planning_from_ready_for_apply(
     ready_email = f"phase-ready-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, onboarding_email, currency="MAD", sweep_interval_days=30)
         _put_latest_record(
             client,
@@ -365,7 +365,7 @@ def test_latest_record_storage_derives_money_plan_progress_when_snapshot_is_miss
     email = f"missing-progress-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
         _put_latest_record(
             client,
@@ -404,7 +404,7 @@ def test_primary_objective_sql_uses_canonical_modern_signals_on_save(
     email = f"primary-save-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
         response = client.put(
             "/users/me/onboarding-v2-records/latest",
@@ -439,7 +439,7 @@ def test_apply_endpoint_rejects_when_distribution_setup_is_missing(
     email = f"missing-setup-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
         _create_distribution_target_envelope(client, "Courses")
         _put_latest_record(client, answers=answers, draft_objects={})
@@ -475,7 +475,7 @@ def test_apply_endpoint_rejects_when_distribution_setup_is_missing(
                 select(Envelope).where(Envelope.user_id == user.id).order_by(Envelope.name.asc())
             )
             envelope_names = [item.name for item in envelopes_result.scalars().all()]
-            assert envelope_names == ["Cash", "Courses", "Epargnes"]
+            assert envelope_names == ["cash", "courses", "epargnes"]
 
     asyncio.run(_assert_db_state())
 
@@ -489,7 +489,7 @@ def test_apply_endpoint_accepts_complete_legacy_distribution_rules(
     email = f"legacy-valid-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
         course_envelope = _create_distribution_target_envelope(client, "Courses")
         _create_legacy_distribution_rule(
@@ -540,7 +540,7 @@ def test_apply_endpoint_rejects_partial_legacy_distribution_rules(
     email = f"legacy-partial-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
         course_envelope = _create_distribution_target_envelope(client, "Courses")
         _create_distribution_target_envelope(client, "Santé")
@@ -595,7 +595,7 @@ def test_list_records_normalizes_legacy_answers_and_progress_for_read(
     email = f"legacy-readable-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
 
     async def _seed_legacy_record() -> None:
@@ -640,7 +640,7 @@ def test_list_records_normalizes_legacy_answers_and_progress_for_read(
     asyncio.run(_seed_legacy_record())
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         login_user(client, email)
         response = client.get("/users/me/onboarding-v2-records")
         assert response.status_code == 200, response.text
@@ -693,7 +693,7 @@ def test_apply_recalculates_stale_primary_objective_from_modern_guidance(
     email = f"primary-apply-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
 
     async def _seed_stale_record() -> None:
@@ -723,7 +723,7 @@ def test_apply_recalculates_stale_primary_objective_from_modern_guidance(
     asyncio.run(_seed_stale_record())
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         login_user(client, email)
         apply_response = client.post("/users/me/onboarding-v2-records/latest/apply")
         assert apply_response.status_code == 200, apply_response.text
@@ -749,7 +749,7 @@ def test_list_records_marks_legacy_completed_invalid_record_as_inconsistent(app,
     email = f"legacy-invalid-{suffix}@example.com"
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         register_user(client, email, currency="MAD", sweep_interval_days=30)
 
     async def _seed_invalid_completed_record() -> None:
@@ -782,7 +782,7 @@ def test_list_records_marks_legacy_completed_invalid_record_as_inconsistent(app,
     asyncio.run(_seed_invalid_completed_record())
 
     _reset_app_engine()
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver.local") as client:
         login_user(client, email)
         response = client.get("/users/me/onboarding-v2-records")
         assert response.status_code == 200, response.text

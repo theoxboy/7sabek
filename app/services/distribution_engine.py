@@ -73,7 +73,7 @@ async def cash_available_for_period(
 
 def _fixed_rules(rules: Iterable[DistributionRule]) -> list[DistributionRule]:
     return sorted(
-        (rule for rule in rules if rule.enabled and rule.mode == "fixed_per_period"),
+        (rule for rule in rules if rule.enabled and rule.mode in {"fixed", "fixed_per_period"}),
         key=lambda rule: rule.rank,
     )
 
@@ -83,7 +83,7 @@ def _percent_rules(rules: Iterable[DistributionRule]) -> list[DistributionRule]:
         (
             rule
             for rule in rules
-            if rule.enabled and rule.mode == "percent_of_income"
+            if rule.enabled and rule.mode in {"percent", "percent_of_income"}
         ),
         key=lambda rule: rule.rank,
     )
@@ -100,6 +100,123 @@ async def build_distribution_plan(
 ) -> list[DistributionPlanItem]:
     if cash_available <= 0 or base_amount <= 0:
         return []
+
+    from app.services.sweep_context import build_sweep_bootstrap_status
+    from app.services.envelope_rules import name_key, _DEBT_KEYWORDS
+
+    bootstrap = await build_sweep_bootstrap_status(db, user)
+    expected_income_str = bootstrap.get("expected_income_amount") if bootstrap else None
+    expected_income = Decimal(expected_income_str) if expected_income_str else None
+
+    if expected_income is not None and expected_income > 0 and base_amount < expected_income:
+        # Run standard simulation using expected_income as base_amount
+        expected_plan = await build_distribution_plan(
+            db=db,
+            user=user,
+            ctx=ctx,
+            rules=rules,
+            cash_available=expected_income,
+            base_amount=expected_income,
+            apply_income_filter=apply_income_filter,
+        )
+
+        # Load all target envelopes to check their types and properties
+        envelope_ids = {item.to_envelope_id for item in expected_plan}
+        envelopes_map = {}
+        if envelope_ids:
+            envelopes_res = await db.execute(
+                select(Envelope).where(Envelope.id.in_(list(envelope_ids)))
+            )
+            envelopes_map = {env.id: env for env in envelopes_res.scalars().all()}
+
+        fixed_items = []
+        flex_items = []
+        debt_items = []
+        goal_items = []
+
+        for item in expected_plan:
+            env = envelopes_map.get(item.to_envelope_id)
+            is_goal = item.target_type == "goal" or (env.is_goal if env else False)
+            is_flex = name_key(item.target_name) in {name_key("flexibility"), name_key("flex"), name_key("المرونة")}
+            is_debt = env.is_debt if env else any(kw in name_key(item.target_name) for kw in _DEBT_KEYWORDS)
+
+            if is_goal:
+                goal_items.append(item)
+            elif is_flex:
+                flex_items.append(item)
+            elif is_debt:
+                debt_items.append(item)
+            else:
+                fixed_items.append(item)
+
+        cash_remaining = base_amount
+        plan: list[DistributionPlanItem] = []
+
+        # Tier 1: Fixed (highest priority)
+        for item in fixed_items:
+            allocated = min(item.amount, cash_remaining)
+            cash_remaining -= allocated
+            if allocated > 0:
+                plan.append(
+                    DistributionPlanItem(
+                        rule_id=item.rule_id,
+                        target_type=item.target_type,
+                        target_id=item.target_id,
+                        target_name=item.target_name,
+                        to_envelope_id=item.to_envelope_id,
+                        amount=allocated,
+                    )
+                )
+
+        # Tier 2: Debts (second priority)
+        for item in debt_items:
+            allocated = min(item.amount, cash_remaining)
+            cash_remaining -= allocated
+            if allocated > 0:
+                plan.append(
+                    DistributionPlanItem(
+                        rule_id=item.rule_id,
+                        target_type=item.target_type,
+                        target_id=item.target_id,
+                        target_name=item.target_name,
+                        to_envelope_id=item.to_envelope_id,
+                        amount=allocated,
+                    )
+                )
+
+        # Tier 3: Flex (third priority)
+        for item in flex_items:
+            allocated = min(item.amount, cash_remaining)
+            cash_remaining -= allocated
+            if allocated > 0:
+                plan.append(
+                    DistributionPlanItem(
+                        rule_id=item.rule_id,
+                        target_type=item.target_type,
+                        target_id=item.target_id,
+                        target_name=item.target_name,
+                        to_envelope_id=item.to_envelope_id,
+                        amount=allocated,
+                    )
+                )
+
+        # Tier 4: Goals (lowest priority)
+        for item in goal_items:
+            allocated = min(item.amount, cash_remaining)
+            cash_remaining -= allocated
+            if allocated > 0:
+                plan.append(
+                    DistributionPlanItem(
+                        rule_id=item.rule_id,
+                        target_type=item.target_type,
+                        target_id=item.target_id,
+                        target_name=item.target_name,
+                        to_envelope_id=item.to_envelope_id,
+                        amount=allocated,
+                    )
+                )
+
+        return plan
 
     plan: list[DistributionPlanItem] = []
     cash_remaining = min(cash_available, base_amount)
@@ -170,6 +287,28 @@ async def build_distribution_plan(
     if total_percent <= 0:
         return plan
 
+    if Decimal("0.00") < total_percent < Decimal("100"):
+        envelope_result = await db.execute(
+            select(Envelope).where(
+                Envelope.user_id == user.id,
+                Envelope.is_default_savings.is_(True),
+            )
+        )
+        default_savings = envelope_result.scalar_one_or_none()
+        if default_savings is not None:
+            remainder_percent = Decimal("100") - total_percent
+            synthetic_rule = DistributionRule(
+                id=UUID("00000000-0000-0000-0000-000000000000"),
+                user_id=user.id,
+                target_type="envelope",
+                target_id=default_savings.id,
+                mode="percent",
+                percent=remainder_percent,
+                enabled=True,
+            )
+            valid_percent_rules.append(synthetic_rule)
+            total_percent = Decimal("100")
+
     if total_percent > Decimal("100"):
         expected_total = cash_remaining
         divisor = total_percent
@@ -186,7 +325,7 @@ async def build_distribution_plan(
             if desired_amount < 0:
                 desired_amount = Decimal("0.00")
         else:
-            desired_amount = _quantize_amount(expected_total * (percent / divisor))
+            desired_amount = _quantize_amount(cash_remaining * (percent / divisor))
             running_total = _quantize_amount(running_total + desired_amount)
 
         if desired_amount <= 0:

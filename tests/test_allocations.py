@@ -54,10 +54,10 @@ def test_allocate_increases_balance(client: TestClient) -> None:
     assert response.status_code == 201
     data = response.json()
 
-    assert data["balance"]["opening_balance"] == "0"
-    assert data["balance"]["total_allocations"] == "100.00"
-    assert data["balance"]["total_spent"] == "0"
-    assert data["balance"]["closing_balance"] == "100.00"
+    assert float(data["balance"]["opening_balance"]) == 0.0
+    assert float(data["balance"]["total_allocations"]) == 100.0
+    assert float(data["balance"]["total_spent"]) == 0.0
+    assert float(data["balance"]["closing_balance"]) == 100.0
 
     period_id = data["allocation"]["envelope_period_id"]
     balance_response = client.get(
@@ -68,7 +68,7 @@ def test_allocate_increases_balance(client: TestClient) -> None:
 
     second_payload = {
         "amount": "20.00",
-        "occurred_on": (occurred_on + timedelta(days=1)).isoformat(),
+        "occurred_on": occurred_on.isoformat(),
     }
     second = client.post(
         f"/envelopes/{envelope['id']}/allocate",

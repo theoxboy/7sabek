@@ -17,6 +17,7 @@ class TransactionCreate(BaseModel):
     occurred_on: date
     description: Optional[str] = Field(default=None, max_length=255)
     source: str = Field(default="manual", pattern="^(manual|assistant)$")
+    permanent_shift: Optional[bool] = Field(default=None)
 
 
 class TransactionOut(BaseModel):

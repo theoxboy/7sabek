@@ -46,6 +46,9 @@ from app.models.email_preference import EmailPreference
 from app.models.email_unsubscribe import EmailUnsubscribe
 from app.models.email_suppression import EmailSuppression
 from app.models.registration_lead import RegistrationLead
+from app.models.contact_message import ContactMessage
+from app.models.merchant_category_mappings import MerchantCategoryMapping
+from app.models.user_category_preferences import UserCategoryPreference
 
 __all__ = [
     "Category",
@@ -96,4 +99,7 @@ __all__ = [
     "EmailUnsubscribe",
     "EmailSuppression",
     "RegistrationLead",
+    "ContactMessage",
+    "MerchantCategoryMapping",
+    "UserCategoryPreference",
 ]

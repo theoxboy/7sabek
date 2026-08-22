@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, exists, select, func
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +27,7 @@ from app.models import (
     User,
 )
 from app.services.balances import compute_period_balance
-from app.services.periods import period_bounds
+from app.services.periods import period_bounds, get_effective_income_date
 from app.services.sweep_context import resolve_user_sweep_anchor_date
 from app.services.distribution_engine import (
     DistributionContext,
@@ -37,6 +37,8 @@ from app.services.distribution_engine import (
 )
 from app.services.distribution_effective_rules import get_effective_distribution_rules
 from app.services.gamification import apply_transaction_scoring
+from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS
+
 
 
 async def resolve_envelope_for_category(
@@ -113,6 +115,160 @@ async def resolve_default_savings_envelope(db: AsyncSession, user_id: UUID) -> E
     if envelope is None:
         raise HTTPException(status_code=409, detail="DEFAULT_SAVINGS_ENVELOPE_MISSING")
     return envelope
+
+
+async def propagate_period_balances(
+    db: AsyncSession,
+    user_id: UUID,
+    envelope_id: UUID,
+    start_date: date,
+) -> None:
+    queue = [(envelope_id, start_date)]
+    processed = set()
+    default_savings = None
+
+    while queue:
+        curr_env_id, curr_start = queue.pop(0)
+        state_key = (curr_env_id, curr_start)
+        if state_key in processed:
+            continue
+        processed.add(state_key)
+
+        env_res = await db.execute(
+            select(Envelope).where(Envelope.id == curr_env_id)
+        )
+        envelope = env_res.scalar_one_or_none()
+        if not envelope:
+            continue
+
+        periods_res = await db.execute(
+            select(EnvelopePeriod)
+            .where(
+                EnvelopePeriod.envelope_id == curr_env_id,
+                EnvelopePeriod.period_start >= curr_start,
+            )
+            .order_by(EnvelopePeriod.period_start.asc())
+        )
+        periods = list(periods_res.scalars().all())
+
+        for period in periods:
+            if period.rollover_from_period_id is not None:
+                prev_bal = await compute_period_balance(db, period.rollover_from_period_id)
+                new_opening = prev_bal["closing_balance"]
+                if period.opening_balance != new_opening:
+                    period.opening_balance = new_opening
+                    db.add(period)
+                    queue.append((curr_env_id, period.period_end))
+
+            if not (envelope.is_cash or envelope.is_default_savings or envelope.rollover_enabled):
+                if period.swept_at is not None:
+                    alloc_res = await db.execute(
+                        select(func.coalesce(func.sum(EnvelopeAllocation.amount), 0))
+                        .where(EnvelopeAllocation.envelope_period_id == period.id)
+                    )
+                    allocations = Decimal(str(alloc_res.scalar_one()))
+
+                    move_res = await db.execute(
+                        select(func.coalesce(func.sum(EnvelopeMovement.amount), 0))
+                        .where(EnvelopeMovement.envelope_period_id == period.id)
+                    )
+                    movements = Decimal(str(move_res.scalar_one()))
+
+                    sweep_in_res = await db.execute(
+                        select(func.coalesce(func.sum(Sweep.amount), 0))
+                        .where(Sweep.to_envelope_period_id == period.id)
+                    )
+                    sweeps_in = Decimal(str(sweep_in_res.scalar_one()))
+
+                    balance_before_sweep = period.opening_balance + allocations + movements + sweeps_in
+
+                    sweep_res = await db.execute(
+                        select(Sweep).where(Sweep.from_envelope_period_id == period.id)
+                    )
+                    sweep = sweep_res.scalar_one_or_none()
+
+                    if balance_before_sweep > 0:
+                        if default_savings is None:
+                            default_savings = await resolve_default_savings_envelope(db, user_id)
+
+                        user_res = await db.execute(select(User).where(User.id == user_id))
+                        user = user_res.scalar_one()
+                        anchor_date = await resolve_user_sweep_anchor_date(db, user)
+
+                        savings_period = await get_or_create_envelope_period(
+                            db=db,
+                            user_id=user_id,
+                            envelope_id=default_savings.id,
+                            occurred_on=period.period_start,
+                            sweep_interval_days=user.sweep_interval_days,
+                            anchor_date=anchor_date,
+                        )
+
+                        if sweep is not None:
+                            if sweep.amount != balance_before_sweep or sweep.to_envelope_period_id != savings_period.id:
+                                sweep.amount = balance_before_sweep
+                                sweep.to_envelope_period_id = savings_period.id
+                                db.add(sweep)
+                                queue.append((default_savings.id, savings_period.period_start))
+                        else:
+                            sweep = Sweep(
+                                user_id=user_id,
+                                from_envelope_period_id=period.id,
+                                to_envelope_period_id=savings_period.id,
+                                amount=balance_before_sweep,
+                                swept_on=period.period_end,
+                            )
+                            db.add(sweep)
+                            queue.append((default_savings.id, savings_period.period_start))
+
+                        log_res = await db.execute(
+                            select(EnvelopeTransferLog).where(
+                                EnvelopeTransferLog.user_id == user_id,
+                                EnvelopeTransferLog.from_envelope_id == envelope.id,
+                                EnvelopeTransferLog.to_envelope_id == default_savings.id,
+                                EnvelopeTransferLog.period_start == period.period_start,
+                                EnvelopeTransferLog.period_end == period.period_end,
+                            )
+                        )
+                        tx_log = log_res.scalar_one_or_none()
+                        if tx_log is not None:
+                            tx_log.amount = balance_before_sweep
+                            db.add(tx_log)
+                        else:
+                            tx_log = EnvelopeTransferLog(
+                                user_id=user_id,
+                                to_envelope_id=default_savings.id,
+                                from_envelope_id=envelope.id,
+                                from_envelope_name=envelope.name,
+                                amount=balance_before_sweep,
+                                period_start=period.period_start,
+                                period_end=period.period_end,
+                            )
+                            db.add(tx_log)
+                    else:
+                        if sweep is not None:
+                            dest_period_res = await db.execute(
+                                select(EnvelopePeriod).where(EnvelopePeriod.id == sweep.to_envelope_period_id)
+                            )
+                            dest_period = dest_period_res.scalar_one_or_none()
+                            await db.delete(sweep)
+                            if dest_period is not None:
+                                queue.append((default_savings.id, dest_period.period_start))
+
+                        log_res = await db.execute(
+                            select(EnvelopeTransferLog).where(
+                                EnvelopeTransferLog.user_id == user_id,
+                                EnvelopeTransferLog.from_envelope_id == envelope.id,
+                                EnvelopeTransferLog.period_start == period.period_start,
+                                EnvelopeTransferLog.period_end == period.period_end,
+                            )
+                        )
+                        tx_log = log_res.scalar_one_or_none()
+                        if tx_log is not None:
+                            await db.delete(tx_log)
+
+                        period.swept_at = None
+                        db.add(period)
 
 
 async def get_or_create_envelope_period(
@@ -289,6 +445,9 @@ async def create_transaction_with_effects(
     occurred_on: date,
     description: Optional[str],
     source: str = "manual",
+    permanent_shift: Optional[bool] = None,
+    commit: bool = True,
+    enforce_auto_distribution_flag: bool = True,
 ) -> Transaction:
     anchor_date = await resolve_user_sweep_anchor_date(db, user)
     transaction = Transaction(
@@ -323,13 +482,26 @@ async def create_transaction_with_effects(
             amount=-amount,
         )
         db.add(movement)
+        await propagate_period_balances(db, user.id, envelope.id, period.period_start)
     elif transaction_type == TransactionType.INCOME:
+        if category.name in INTERNAL_INCOME_CATEGORY_KEYS and permanent_shift is not None:
+            from app.services.sweeps import force_close_current_cycle
+            await force_close_current_cycle(db, user, occurred_on, permanent_shift)
+            # Re-resolve the anchor date in case it was updated
+            anchor_date = await resolve_user_sweep_anchor_date(db, user)
+
         envelope = await resolve_cash_envelope(db, user.id)
+        effective_occurred_on = occurred_on
+        if category.name in INTERNAL_INCOME_CATEGORY_KEYS:
+            if permanent_shift is None:
+                effective_occurred_on = get_effective_income_date(
+                    occurred_on, anchor_date, user.sweep_interval_days
+                )
         period = await get_or_create_envelope_period(
             db,
             user.id,
             envelope.id,
-            occurred_on,
+            effective_occurred_on,
             user.sweep_interval_days,
             anchor_date,
         )
@@ -340,12 +512,17 @@ async def create_transaction_with_effects(
             amount=amount,
         )
         db.add(movement)
+        await propagate_period_balances(db, user.id, envelope.id, period.period_start)
 
-        rules = await get_effective_distribution_rules(db, user)
+        rules = (
+            await get_effective_distribution_rules(db, user)
+            if (user.auto_distribution_enabled or not enforce_auto_distribution_flag)
+            else []
+        )
         if rules:
-            cash_available = await cash_available_for_period(db, user, occurred_on)
+            cash_available = await cash_available_for_period(db, user, effective_occurred_on)
             ctx = DistributionContext(
-                occurred_on=occurred_on,
+                occurred_on=effective_occurred_on,
                 period_start=period.period_start,
                 period_end=period.period_end,
             )
@@ -371,7 +548,7 @@ async def create_transaction_with_effects(
                 .limit(1)
             )
             active_config = active_config_result.scalar_one_or_none()
-            await apply_distribution_plan(
+            log = await apply_distribution_plan(
                 db=db,
                 user=user,
                 ctx=ctx,
@@ -382,11 +559,26 @@ async def create_transaction_with_effects(
                 config_id=active_config.id if active_config is not None else None,
                 config_version=active_config.version if active_config is not None else None,
             )
+            item_res = await db.execute(
+                select(DistributionLogItem).where(DistributionLogItem.log_id == log.id)
+            )
+            items = list(item_res.scalars().all())
+            unique_period_ids = set()
+            for item in items:
+                unique_period_ids.add(item.to_envelope_period_id)
+                unique_period_ids.add(item.from_envelope_period_id)
+            if unique_period_ids:
+                periods_res = await db.execute(
+                    select(EnvelopePeriod).where(EnvelopePeriod.id.in_(list(unique_period_ids)))
+                )
+                for p in periods_res.scalars().all():
+                    await propagate_period_balances(db, user.id, p.envelope_id, p.period_start)
 
     await apply_transaction_scoring(db, user, transaction)
 
-    await db.commit()
-    await db.refresh(transaction)
+    if commit:
+        await db.commit()
+        await db.refresh(transaction)
     return transaction
 
 
@@ -407,12 +599,16 @@ async def clear_income_distribution_effects(
     if not logs:
         return
 
+    unique_period_ids = set()
     for log in logs:
         item_result = await db.execute(
             select(DistributionLogItem).where(DistributionLogItem.log_id == log.id)
         )
         items = list(item_result.scalars().all())
         for item in items:
+            unique_period_ids.add(item.to_envelope_period_id)
+            unique_period_ids.add(item.from_envelope_period_id)
+
             allocation = None
             if item.allocation_id is not None:
                 allocation_result = await db.execute(
@@ -469,6 +665,13 @@ async def clear_income_distribution_effects(
         )
         await db.delete(log)
 
+    if unique_period_ids:
+        periods_res = await db.execute(
+            select(EnvelopePeriod).where(EnvelopePeriod.id.in_(list(unique_period_ids)))
+        )
+        for p in periods_res.scalars().all():
+            await propagate_period_balances(db, user_id, p.envelope_id, p.period_start)
+
 
 async def apply_income_distribution_for_transaction(
     db: AsyncSession,
@@ -513,7 +716,7 @@ async def apply_income_distribution_for_transaction(
         .limit(1)
     )
     active_config = active_config_result.scalar_one_or_none()
-    await apply_distribution_plan(
+    log = await apply_distribution_plan(
         db=db,
         user=user,
         ctx=ctx,
@@ -524,3 +727,17 @@ async def apply_income_distribution_for_transaction(
         config_id=active_config.id if active_config is not None else None,
         config_version=active_config.version if active_config is not None else None,
     )
+    item_res = await db.execute(
+        select(DistributionLogItem).where(DistributionLogItem.log_id == log.id)
+    )
+    items = list(item_res.scalars().all())
+    unique_period_ids = set()
+    for item in items:
+        unique_period_ids.add(item.to_envelope_period_id)
+        unique_period_ids.add(item.from_envelope_period_id)
+    if unique_period_ids:
+        periods_res = await db.execute(
+            select(EnvelopePeriod).where(EnvelopePeriod.id.in_(list(unique_period_ids)))
+        )
+        for p in periods_res.scalars().all():
+            await propagate_period_balances(db, user.id, p.envelope_id, p.period_start)

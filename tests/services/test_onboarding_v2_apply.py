@@ -107,7 +107,57 @@ def test_apply_materializes_expense_envelopes_missing_from_e11_selection(databas
 
             envelopes_result = await db.execute(select(Envelope).where(Envelope.user_id == user.id))
             names = {env.name for env in envelopes_result.scalars().all()}
-            assert "Netflix" in names
-            assert "Aide famille" in names
+            assert "netflix" in names
+            assert "aide famille" in names
 
     asyncio.run(_run())
+
+
+def test_apply_onboarding_v2_payload_injects_starting_balance(database_url: str) -> None:
+    answers = build_answers(include_explicit_envelope_answers=True, modernize=True)
+
+    async def _run() -> None:
+        sessionmaker = await _build_sessionmaker(database_url)
+        async with sessionmaker() as db:
+            user = await _create_user_with_defaults(db, "apply-starting-balance@example.com")
+            
+            # Run apply onboarding
+            await apply_onboarding_v2_payload(
+                db,
+                user,
+                answers=answers,
+                draft_objects={},
+            )
+            await db.flush()
+
+            # Assert that:
+            # 1. A starting balance transaction was created for the user
+            from app.models import Transaction, TransactionType
+            from decimal import Decimal
+            tx_res = await db.execute(
+                select(Transaction).where(
+                    Transaction.user_id == user.id,
+                    Transaction.type == TransactionType.INCOME,
+                )
+            )
+            txs = list(tx_res.scalars().all())
+            assert len(txs) == 1
+            tx = txs[0]
+            assert tx.amount == Decimal("6000.00")
+            from app.services.periods import period_bounds
+            expected_start, _ = period_bounds(date(2026, 4, 1), date.today(), 30)
+            assert tx.occurred_on == expected_start
+
+
+
+
+            # 2. Envelope movements exist (reflecting transaction and its distribution)
+            from app.models import EnvelopeMovement
+            m_res = await db.execute(
+                select(EnvelopeMovement).where(EnvelopeMovement.user_id == user.id)
+            )
+            movements = list(m_res.scalars().all())
+            assert len(movements) > 0
+
+    asyncio.run(_run())
+

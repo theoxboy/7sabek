@@ -246,7 +246,7 @@ async def get_effective_distribution_rules(
     existing_fixed_targets = {
         (rule.target_type, rule.target_id)
         for rule in existing_rules
-        if rule.enabled and rule.mode == "fixed_per_period"
+        if rule.enabled and rule.mode in {"fixed", "fixed_per_period"}
     }
     next_rank = max((int(rule.rank or 1) for rule in existing_rules), default=0) + 1
     merged = list(existing_rules)

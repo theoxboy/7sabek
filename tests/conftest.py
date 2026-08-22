@@ -74,6 +74,7 @@ def clean_db(database_url: str) -> None:
 @pytest.fixture()
 def app(database_url: str):
     os.environ["ENVIRONMENT"] = "test"
+    os.environ["RECAPTCHA_ENABLED"] = "false"
     get_settings.cache_clear()
     app = create_app()
 
@@ -92,4 +93,4 @@ def app(database_url: str):
 
 @pytest.fixture()
 def client(app) -> TestClient:
-    return TestClient(app)
+    return TestClient(app, base_url="https://testserver.local")

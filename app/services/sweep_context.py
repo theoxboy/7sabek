@@ -8,7 +8,8 @@ from typing import Any
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import OnboardingV2Record, Transaction, TransactionType, User
+from app.models import Category, OnboardingV2Record, Transaction, TransactionType, User
+from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS_SQL
 
 
 def infer_sweep_interval_days_from_answers(answers: dict[str, Any] | None) -> int:
@@ -156,9 +157,31 @@ async def get_latest_onboarding_record(
     return result.scalar_one_or_none()
 
 
+def get_onboarding_completed_at(record: OnboardingV2Record) -> datetime:
+    if isinstance(record.payload, dict):
+        m_state = record.payload.get("materialized_state")
+        if isinstance(m_state, dict):
+            applied_at = m_state.get("applied_at")
+            if applied_at:
+                try:
+                    if applied_at.endswith("Z"):
+                        applied_at = applied_at[:-1] + "+00:00"
+                    return datetime.fromisoformat(applied_at)
+                except ValueError:
+                    pass
+    return record.updated_at
+
+
 async def resolve_user_sweep_anchor_date(db: AsyncSession, user: User) -> date:
     record = await get_latest_onboarding_record(db, user.id)
     if record and isinstance(record.payload, dict):
+        cached_anchor = record.payload.get("sweep_anchor_date")
+        if cached_anchor:
+            try:
+                return date.fromisoformat(cached_anchor)
+            except ValueError:
+                pass
+
         answers = record.payload.get("answers")
         draft_objects = record.payload.get("draft_objects")
         bootstrap = extract_sweep_bootstrap(
@@ -166,22 +189,36 @@ async def resolve_user_sweep_anchor_date(db: AsyncSession, user: User) -> date:
             draft_objects=draft_objects if isinstance(draft_objects, dict) else {},
         )
         if bootstrap:
+            bootstrap_date = bootstrap.get("last_income_date")
+            if isinstance(bootstrap_date, date):
+                new_payload = dict(record.payload)
+                new_payload["sweep_anchor_date"] = bootstrap_date.isoformat()
+                record.payload = new_payload
+                db.add(record)
+                await db.flush()
+                return bootstrap_date
+
+            completed_at = get_onboarding_completed_at(record)
             first_income_result = await db.execute(
                 select(Transaction.occurred_on)
+                .join(Category, Transaction.category_id == Category.id)
                 .where(
                     Transaction.user_id == user.id,
                     Transaction.type == TransactionType.INCOME,
-                    Transaction.created_at >= record.updated_at,
+                    Category.name.in_(INTERNAL_INCOME_CATEGORY_KEYS_SQL),
+                    Transaction.created_at >= completed_at,
                 )
                 .order_by(Transaction.created_at.asc())
                 .limit(1)
             )
             first_income_occurred_on = first_income_result.scalar_one_or_none()
             if isinstance(first_income_occurred_on, date):
+                new_payload = dict(record.payload)
+                new_payload["sweep_anchor_date"] = first_income_occurred_on.isoformat()
+                record.payload = new_payload
+                db.add(record)
+                await db.flush()
                 return first_income_occurred_on
-            bootstrap_date = bootstrap.get("last_income_date")
-            if isinstance(bootstrap_date, date):
-                return bootstrap_date
     return user.created_at.date()
 
 
@@ -201,11 +238,23 @@ async def build_sweep_bootstrap_status(
     if not bootstrap:
         return None
 
+    completed_at = get_onboarding_completed_at(record)
+    from app.services.periods import period_bounds
+
+    anchor_date = await resolve_user_sweep_anchor_date(db, user)
+    current_period_start, _ = period_bounds(
+        anchor_date,
+        date.today(),
+        user.sweep_interval_days,
+    )
     post_onboarding_income_result = await db.execute(
-        select(func.count(Transaction.id)).where(
+        select(func.count(Transaction.id))
+        .join(Category, Transaction.category_id == Category.id)
+        .where(
             Transaction.user_id == user.id,
             Transaction.type == TransactionType.INCOME,
-            Transaction.created_at >= record.updated_at,
+            Category.name.in_(INTERNAL_INCOME_CATEGORY_KEYS_SQL),
+            Transaction.occurred_on >= current_period_start,
         )
     )
     has_post_onboarding_income = int(post_onboarding_income_result.scalar_one() or 0) > 0
@@ -217,5 +266,5 @@ async def build_sweep_bootstrap_status(
         "expected_income_amount": bootstrap.get("expected_income_amount"),
         "cadence": bootstrap.get("cadence"),
         "interval_days": bootstrap.get("interval_days"),
-        "onboarding_completed_at": record.updated_at,
+        "onboarding_completed_at": completed_at,
     }

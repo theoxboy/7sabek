@@ -274,3 +274,58 @@ def test_income_creates_positive_movement_in_cash(
 
     period_envelope_id = asyncio.run(_fetch())
     assert period_envelope_id == cash["id"]
+
+
+def test_create_transaction_future_date_rejected(client: TestClient) -> None:
+    user = create_user(client, "future-date@example.com")
+    category = create_category(client, user["id"], "Salary")
+
+    # Create transaction with date 8 days in the future
+    future_date = date.today() + timedelta(days=8)
+    payload = {
+        "type": "income",
+        "category_id": category["id"],
+        "amount": "100.00",
+        "occurred_on": future_date.isoformat(),
+        "description": "Future Pay",
+    }
+    response = client.post("/transactions", json=payload)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "TRANSACTION_DATE_TOO_FAR_IN_FUTURE"
+
+    # Create transaction with date 7 days in the future (should be allowed)
+    valid_future_date = date.today() + timedelta(days=7)
+    payload["occurred_on"] = valid_future_date.isoformat()
+    response = client.post("/transactions", json=payload)
+    assert response.status_code == 201
+
+
+def test_update_transaction_future_date_rejected(client: TestClient) -> None:
+    user = create_user(client, "update-future-date@example.com")
+    category = create_category(client, user["id"], "Salary")
+
+    payload = {
+        "type": "income",
+        "category_id": category["id"],
+        "amount": "100.00",
+        "occurred_on": date.today().isoformat(),
+        "description": "Pay",
+    }
+    response = client.post("/transactions", json=payload)
+    assert response.status_code == 201
+    tx_id = response.json()["id"]
+
+    # Try updating to 8 days in the future
+    future_date = date.today() + timedelta(days=8)
+    update_payload = {
+        "occurred_on": future_date.isoformat(),
+    }
+    patch_response = client.patch(f"/transactions/{tx_id}", json=update_payload)
+    assert patch_response.status_code == 400
+    assert patch_response.json()["detail"] == "TRANSACTION_DATE_TOO_FAR_IN_FUTURE"
+
+    # Try updating to 7 days in the future (should be allowed)
+    valid_future_date = date.today() + timedelta(days=7)
+    update_payload["occurred_on"] = valid_future_date.isoformat()
+    patch_response = client.patch(f"/transactions/{tx_id}", json=update_payload)
+    assert patch_response.status_code == 200

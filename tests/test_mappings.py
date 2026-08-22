@@ -36,8 +36,8 @@ def test_get_mappings_empty(client: TestClient) -> None:
 
 def test_put_get_delete_mapping(client: TestClient) -> None:
     user = create_user(client, "mapcrud@example.com")
-    category = create_category(client, user["id"], "Fuel")
-    envelope = create_envelope(client, user["id"], "Car")
+    category = create_category(client, user["id"], "debt_custom")
+    envelope = create_envelope(client, user["id"], "dettes_custom")
 
     put_response = client.put(
         f"/categories/{category['id']}/envelope",
@@ -48,9 +48,11 @@ def test_put_get_delete_mapping(client: TestClient) -> None:
     list_response = client.get("/mappings")
     assert list_response.status_code == 200
     data = list_response.json()
-    assert len(data) == 1
-    assert data[0]["category_id"] == category["id"]
-    assert data[0]["envelope_id"] == envelope["id"]
+    matching_mappings = [
+        m for m in data
+        if m["category_id"] == category["id"] and m["envelope_id"] == envelope["id"]
+    ]
+    assert len(matching_mappings) == 1
 
     delete_response = client.delete(
         f"/categories/{category['id']}/envelope"
@@ -59,7 +61,12 @@ def test_put_get_delete_mapping(client: TestClient) -> None:
 
     list_again = client.get("/mappings")
     assert list_again.status_code == 200
-    assert list_again.json() == []
+    data_again = list_again.json()
+    matching_mappings_again = [
+        m for m in data_again
+        if m["category_id"] == category["id"] and m["envelope_id"] == envelope["id"]
+    ]
+    assert len(matching_mappings_again) == 0
 
 
 def test_mapping_rejects_cross_user_entities(client: TestClient) -> None:

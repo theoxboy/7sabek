@@ -2,15 +2,45 @@ from __future__ import annotations
 
 import re
 
-from app.models import Envelope
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models import Envelope
 
 _MULTISPACE_RE = re.compile(r"\s+")
 _RESERVED_ENVELOPE_KEYS = {"cash", "epargnes"}
-_DEBT_KEYWORDS = ("dettes", "debt", "debts", "credit", "repayment", "loan", "دين")
+_DEBT_KEYWORDS = (
+    "dettes",
+    "debt",
+    "debts",
+    "credit",
+    "crédit",
+    "crédits",
+    "repayment",
+    "repayments",
+    "loan",
+    "loans",
+    "دين",
+    "الديون",
+    "ديون",
+    "قرض",
+    "قروض",
+)
+
 
 
 def normalize_name(value: str) -> str:
-    return _MULTISPACE_RE.sub(" ", value).strip()
+    cleaned = _MULTISPACE_RE.sub(" ", value).strip().lower()
+    replacements = {
+        "أ": "ا",
+        "إ": "ا",
+        "آ": "ا",
+        "ة": "ه",
+        "ى": "ي",
+    }
+    for src, dst in replacements.items():
+        cleaned = cleaned.replace(src, dst)
+    return cleaned
 
 
 def name_key(value: str) -> str:

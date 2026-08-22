@@ -15,13 +15,13 @@ def test_create_user_creates_default_envelope(client: TestClient) -> None:
     assert len(default_envelopes) == 1
 
     default = default_envelopes[0]
-    assert default["name"] == "Epargnes"
+    assert default["name"] == "epargnes"
     assert default["deletable"] is False
     assert default["rollover_enabled"] is True
 
     cash_envelopes = [e for e in envelopes if e["is_cash"]]
     assert len(cash_envelopes) == 1
     cash = cash_envelopes[0]
-    assert cash["name"] == "Cash"
+    assert cash["name"] == "cash"
     assert cash["deletable"] is False
     assert cash["rollover_enabled"] is False

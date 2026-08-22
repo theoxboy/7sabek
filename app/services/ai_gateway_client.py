@@ -109,7 +109,10 @@ def _resolve_gateway(settings: Any) -> Tuple[Dict[str, Any], str]:
     routing_default_model = _safe_string(ai_routing.get("default_model"))
     model = gateway_model or routing_default_model
     if not model:
-        raise AIGatewayConfigurationError(AI_NOT_CONFIGURED_MESSAGE)
+        raise AIGatewayConfigurationError(
+            "AI Gateway model is not configured. Set a model on the gateway "
+            "or set a default model in AI Routing settings."
+        )
 
     return selected, model
 
@@ -268,3 +271,299 @@ async def suggest_email_draft_via_gateway(
 
     suggestion_raw = _extract_json_payload(content)
     return _normalize_suggestion_payload(suggestion_raw)
+
+
+# ---------------------------------------------------------------------------
+# Chat completion (conversational AI advisor) via gateway
+# ---------------------------------------------------------------------------
+
+
+async def chat_completion_via_gateway(
+    db: AsyncSession,
+    *,
+    messages: list[dict[str, str]],
+    system_prompt: Optional[str] = None,
+) -> str:
+    """Send a conversation to the configured AI gateway and return the text response.
+
+    This function supports both ``native_gemini`` and OpenAI-compatible protocols.
+
+    Parameters
+    ----------
+    db : AsyncSession
+        Database session for reading platform settings.
+    messages : list[dict[str, str]]
+        Conversation history. Each dict must have ``role`` (``user``/``model``
+        for Gemini, or ``user``/``assistant``/``system`` for OpenAI) and
+        ``content`` (the message text).
+    system_prompt : str | None
+        Optional system-level instruction. Will be injected as a system message
+        for OpenAI-compatible endpoints, or as ``system_instruction`` for
+        native Gemini.
+
+    Returns
+    -------
+    str
+        The text content of the AI's response.
+
+    Raises
+    ------
+    AIGatewayConfigurationError
+        If no active gateway is configured.
+    AIGatewayUnsupportedProviderError
+        If the provider/protocol is not supported for chat.
+    ValueError
+        If the API request fails or returns an empty/invalid response.
+    """
+    settings = await get_platform_settings(db, create_if_missing=False)
+    gateway, model = _resolve_gateway(settings)
+
+    provider = _safe_string(gateway.get("provider")).lower()
+    protocol = _safe_string(gateway.get("protocol")).lower()
+    base_url = _safe_string(gateway.get("base_url"))
+    api_key = _safe_string(gateway.get("api_key"))
+    auth_header = _safe_string(gateway.get("auth_header")) or "Authorization"
+    auth_scheme = _safe_string(gateway.get("auth_scheme")) or "Bearer"
+    paths = gateway.get("paths") if isinstance(gateway.get("paths"), dict) else {}
+
+    is_native_gemini = protocol == "native_gemini" or provider == "gemini"
+
+    if is_native_gemini:
+        return await _chat_completion_gemini(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            auth_header=auth_header,
+            auth_scheme=auth_scheme,
+            paths=paths,
+            messages=messages,
+            system_prompt=system_prompt,
+            settings=settings,
+        )
+
+    # Default: OpenAI-compatible / general protocol
+    return await _chat_completion_openai(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        auth_header=auth_header,
+        auth_scheme=auth_scheme,
+        paths=paths,
+        messages=messages,
+        system_prompt=system_prompt,
+        settings=settings,
+    )
+
+
+async def _chat_completion_gemini(
+    base_url: str,
+    api_key: str,
+    model: str,
+    auth_header: str,
+    auth_scheme: str,
+    paths: dict[str, Any],
+    messages: list[dict[str, str]],
+    system_prompt: Optional[str],
+    settings: Any,
+) -> str:
+    """Invoke a native Gemini generation endpoint."""
+    # Map message roles: user -> user, model/assistant -> model
+    contents: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = _safe_string(msg.get("content", ""))
+        if not content:
+            continue
+        gemini_role = "model" if role in ("model", "assistant") else "user"
+        contents.append({
+            "role": gemini_role,
+            "parts": [{"text": content}],
+        })
+
+    # Build the request payload
+    payload: dict[str, Any] = {
+        "contents": contents,
+    }
+
+    if system_prompt:
+        payload["system_instruction"] = {
+            "parts": [{"text": system_prompt}],
+        }
+
+    # Resolve the endpoint URL
+    gemini_path = _safe_string(paths.get("generate_content") or paths.get("chat") or "")
+    if not gemini_path:
+        # Default Gemini API path for generateContent
+        gemini_path = f"/v1beta/models/{model}:generateContent"
+    endpoint = _gateway_endpoint(base_url, gemini_path)
+
+    # Build headers
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if auth_scheme and auth_scheme.lower() == "bearer":
+        headers[auth_header] = f"Bearer {api_key}"
+    else:
+        headers[auth_header] = api_key
+
+    extra_headers = settings.ai_routing.get("extra_headers") if isinstance(settings.ai_routing, dict) else {}
+    if isinstance(extra_headers, dict):
+        for key, value in extra_headers.items():
+            clean_key = _safe_string(key)
+            clean_value = _safe_string(value)
+            if clean_key:
+                headers[clean_key] = clean_value
+
+    timeout_s = _resolve_timeout(settings)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            response = await client.post(endpoint, json=payload, headers=headers)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body_preview = ""
+        try:
+            body_preview = exc.response.text[:500]
+        except Exception:
+            pass
+        raise ValueError(
+            f"Gemini API returned {exc.response.status_code}: "
+            f"{body_preview or str(exc)}"
+        ) from exc
+    except Exception as exc:
+        raise ValueError(f"Gemini API request failed: {exc}") from exc
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise ValueError("Gemini provider returned invalid JSON response.") from exc
+
+    # Extract text from Gemini response structure
+    candidates = data.get("candidates") if isinstance(data, dict) else None
+    if isinstance(candidates, list) and candidates:
+        first = candidates[0] if isinstance(candidates[0], dict) else {}
+        content_block = first.get("content") if isinstance(first, dict) else {}
+        if isinstance(content_block, dict):
+            parts = content_block.get("parts") if isinstance(content_block, dict) else []
+            if isinstance(parts, list):
+                texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
+                combined = "".join(texts).strip()
+                if combined:
+                    return combined
+
+    raise ValueError("Gemini provider returned an empty response.")
+
+
+async def _chat_completion_openai(
+    base_url: str,
+    api_key: str,
+    model: str,
+    auth_header: str,
+    auth_scheme: str,
+    paths: dict[str, Any],
+    messages: list[dict[str, str]],
+    system_prompt: Optional[str],
+    settings: Any,
+) -> str:
+    """Invoke an OpenAI-compatible chat completions endpoint."""
+    # Build OpenAI-style messages array
+    openai_messages: list[dict[str, str]] = []
+
+    if system_prompt:
+        openai_messages.append({"role": "system", "content": system_prompt})
+
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = _safe_string(msg.get("content", ""))
+        if not content:
+            continue
+        # Map Gemini-style model role to assistant
+        if role in ("model", "assistant"):
+            openai_role = "assistant"
+        else:
+            openai_role = "user"
+        openai_messages.append({"role": openai_role, "content": content})
+
+    completions_path = _safe_string(
+        paths.get("chat_completions") or paths.get("chat") or paths.get("completions") or "/chat/completions"
+    )
+    endpoint = _gateway_endpoint(base_url, completions_path)
+
+    # Build headers
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if auth_scheme:
+        headers[auth_header] = f"{auth_scheme} {api_key}" if auth_scheme != "None" else api_key
+    else:
+        headers[auth_header] = api_key
+
+    # Merge extra headers from gateway paths first, then fall back to ai_routing
+    extra_headers = (
+        paths.get("extra_headers")
+        if isinstance(paths.get("extra_headers"), dict)
+        else None
+    )
+    if not extra_headers:
+        ai_routing = settings.ai_routing if isinstance(settings.ai_routing, dict) else {}
+        extra_headers = (
+            ai_routing.get("extra_headers")
+            if isinstance(ai_routing.get("extra_headers"), dict)
+            else {}
+        )
+    for key, value in extra_headers.items():
+        clean_key = _safe_string(key)
+        clean_value = _safe_string(value)
+        if clean_key:
+            headers[clean_key] = clean_value
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": openai_messages,
+    }
+
+    timeout_s = _resolve_timeout(settings)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            response = await client.post(endpoint, json=payload, headers=headers)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # Try to extract the response body for debugging
+        body_preview = ""
+        try:
+            body_preview = exc.response.text[:500]
+        except Exception:
+            pass
+        raise ValueError(
+            f"AI provider returned {exc.response.status_code}: "
+            f"{body_preview or str(exc)}"
+        ) from exc
+    except Exception as exc:
+        raise ValueError(f"AI provider request failed: {exc}") from exc
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise ValueError("AI provider returned invalid JSON response.") from exc
+
+    # Extract from OpenAI-style response
+    content = ""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first, dict) else {}
+        if isinstance(message, dict):
+            content = _safe_string(message.get("content"))
+
+    if not content:
+        raise ValueError("AI provider returned an empty response.")
+
+    return content
+
+
+def _resolve_timeout(settings: Any) -> float:
+    """Extract the request timeout from settings, defaulting to 60 s."""
+    timeout_ms_raw = 60000
+    ai_routing = settings.ai_routing if isinstance(settings.ai_routing, dict) else {}
+    try:
+        timeout_ms_raw = int(ai_routing.get("request_timeout_ms") or 60000)
+    except Exception:
+        timeout_ms_raw = 60000
+    return max(1.0, min(float(timeout_ms_raw) / 1000.0, 120.0))
