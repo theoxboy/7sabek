@@ -215,6 +215,7 @@ def _build_auth_out(
     user: User,
     access_token: Optional[str] = None,
     refresh_token: Optional[str] = None,
+    session_token: Optional[str] = None,
 ) -> AuthOut:
     return AuthOut(
         id=str(user.id),
@@ -237,6 +238,7 @@ def _build_auth_out(
         profile_photo_url=user.profile_photo_url,
         access_token=access_token,
         refresh_token=refresh_token,
+        session_token=session_token,
         token_type="bearer" if access_token else None,
     )
 
@@ -926,6 +928,7 @@ async def login(
         user,
         access_token=access_token,
         refresh_token=refresh_token,
+        session_token=session_token,
     )
 
 

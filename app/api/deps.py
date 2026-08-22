@@ -71,10 +71,15 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN, detail=blocked_message
         )
 
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    is_bearer_auth = auth_header.strip().lower().startswith("bearer ")
+
     if user.role == "superadmin":
-        await require_active_superadmin_session(request, db, user, touch=False)
+        if not is_bearer_auth:
+            await require_active_superadmin_session(request, db, user, touch=False)
     else:
-        await require_active_account_session(request, db, user, touch=False)
+        if not is_bearer_auth:
+            await require_active_account_session(request, db, user, touch=False)
 
     if (
         user.role == "superadmin"

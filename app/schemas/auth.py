@@ -60,6 +60,7 @@ class AuthOut(BaseModel):
     profile_photo_url: Optional[str] = None
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
+    session_token: Optional[str] = None
     token_type: Optional[str] = "bearer"
 
 
