@@ -108,11 +108,24 @@ def _resolve_gateway(settings: Any) -> Tuple[Dict[str, Any], str]:
     gateway_model = _safe_string(selected.get("model"))
     routing_default_model = _safe_string(ai_routing.get("default_model"))
     model = gateway_model or routing_default_model
-    if not model:
-        raise AIGatewayConfigurationError(
-            "AI Gateway model is not configured. Set a model on the gateway "
-            "or set a default model in AI Routing settings."
-        )
+
+    base_url = _safe_string(selected.get("base_url")).lower()
+    provider = _safe_string(selected.get("provider")).lower()
+
+    # Auto-heal placeholder, blank or invalid model string
+    if not model or "..." in model or ("gpt" in model and "claude" in model and "gemini" in model):
+        if "openrouter.ai" in base_url or provider == "openrouter":
+            model = "google/gemini-2.0-flash-001"
+        elif "generativelanguage.googleapis.com" in base_url or provider == "gemini":
+            model = "gemini-2.0-flash"
+        elif "groq.com" in base_url or provider == "groq":
+            model = "llama-3.3-70b-versatile"
+        elif "mistral.ai" in base_url or provider == "mistral":
+            model = "mistral-small-latest"
+        elif "anthropic.com" in base_url or provider == "anthropic":
+            model = "claude-3-5-haiku-20241022"
+        else:
+            model = "gpt-4o-mini"
 
     return selected, model
 
