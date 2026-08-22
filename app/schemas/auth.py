@@ -58,6 +58,9 @@ class AuthOut(BaseModel):
     country: Optional[str] = None
     city: Optional[str] = None
     profile_photo_url: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_type: Optional[str] = "bearer"
 
 
 class WebLoginTokenOut(BaseModel):

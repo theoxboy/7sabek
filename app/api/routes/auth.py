@@ -211,7 +211,11 @@ def _merge_onboarding_payload_materialized_state(
     )
     return next_payload
 
-def _build_auth_out(user: User) -> AuthOut:
+def _build_auth_out(
+    user: User,
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+) -> AuthOut:
     return AuthOut(
         id=str(user.id),
         email=user.email,
@@ -231,6 +235,9 @@ def _build_auth_out(user: User) -> AuthOut:
         country=user.country,
         city=user.city,
         profile_photo_url=user.profile_photo_url,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer" if access_token else None,
     )
 
 
@@ -244,7 +251,7 @@ async def _restore_if_suspension_expired(db: AsyncSession, user: User) -> None:
         await db.commit()
 
 
-def _set_auth_cookies(response: Response, user_id: str) -> None:
+def _set_auth_cookies(response: Response, user_id: str) -> tuple[str, str]:
     settings = get_settings()
     access_token = create_token(
         subject=user_id,
@@ -274,6 +281,7 @@ def _set_auth_cookies(response: Response, user_id: str) -> None:
         max_age=settings.refresh_token_exp_days * 24 * 60 * 60,
         path="/",
     )
+    return access_token, refresh_token
 
 
 def _set_superadmin_session_cookie(response: Response, token: str) -> None:
@@ -726,10 +734,14 @@ async def register(
             os=None,
             device=None,
         )
-        _set_auth_cookies(response, str(existing_user.id))
+        access_token, refresh_token = _set_auth_cookies(response, str(existing_user.id))
         _set_superadmin_session_cookie(response, session_token)
 
-        return _build_auth_out(existing_user)
+        return _build_auth_out(
+            existing_user,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
 
     next_sweep_date = date.today() + timedelta(days=payload.sweep_interval_days)
     user = User(
@@ -808,10 +820,14 @@ async def register(
         os=None,
         device=None,
     )
-    _set_auth_cookies(response, str(user.id))
+    access_token, refresh_token = _set_auth_cookies(response, str(user.id))
     _set_superadmin_session_cookie(response, session_token)
 
-    return _build_auth_out(user)
+    return _build_auth_out(
+        user,
+        access_token=access_token,
+        refresh_token=refresh_token,
+    )
 
 
 @router.post("/login", response_model=AuthOut)
@@ -904,9 +920,13 @@ async def login(
         device=payload.device,
     )
 
-    _set_auth_cookies(response, str(user.id))
+    access_token, refresh_token = _set_auth_cookies(response, str(user.id))
     _set_superadmin_session_cookie(response, session_token)
-    return _build_auth_out(user)
+    return _build_auth_out(
+        user,
+        access_token=access_token,
+        refresh_token=refresh_token,
+    )
 
 
 @router.post("/refresh", response_model=AuthOut)
@@ -954,10 +974,14 @@ async def refresh(
     else:
         await require_active_account_session(request, db, user, touch=True)
 
-    _set_auth_cookies(response, str(user.id))
+    access_token, refresh_token = _set_auth_cookies(response, str(user.id))
     if session_token:
         _set_superadmin_session_cookie(response, session_token)
-    return _build_auth_out(user)
+    return _build_auth_out(
+        user,
+        access_token=access_token,
+        refresh_token=refresh_token,
+    )
 
 
 @router.post("/force-reset", response_model=AuthOut)
@@ -1001,8 +1025,12 @@ async def force_reset_password(
     user.must_reset_password = False
     await db.commit()
 
-    _set_auth_cookies(response, str(user.id))
-    return _build_auth_out(user)
+    access_token, refresh_token = _set_auth_cookies(response, str(user.id))
+    return _build_auth_out(
+        user,
+        access_token=access_token,
+        refresh_token=refresh_token,
+    )
 
 
 @router.post("/password-reset/request", response_model=StatusOut)

@@ -99,7 +99,11 @@ async def require_active_account_session(
     missing_detail: str = "SESSION_REQUIRED",
     revoked_detail: str = "SESSION_REVOKED",
 ) -> SuperadminSession:
-    token = request.cookies.get(SUPERADMIN_SESSION_COOKIE)
+    token = (
+        request.cookies.get(SUPERADMIN_SESSION_COOKIE)
+        or request.headers.get("x-session-token")
+        or request.headers.get("X-Session-Token")
+    )
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
