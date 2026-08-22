@@ -11,19 +11,28 @@ from app.models.platform_settings import (
 )
 
 
+import logging
+
+logger = logging.getLogger("app.platform_settings")
+
+
 async def get_platform_settings(
     db: AsyncSession, create_if_missing: bool = False
 ) -> PlatformSettings:
-    settings = await db.get(PlatformSettings, 1)
-    if settings is not None:
+    try:
+        settings = await db.get(PlatformSettings, 1)
+        if settings is not None:
+            return settings
+        if not create_if_missing:
+            return PlatformSettings(id=1, **DEFAULT_PLATFORM_SETTINGS)
+        settings = PlatformSettings(id=1, **DEFAULT_PLATFORM_SETTINGS)
+        db.add(settings)
+        await db.commit()
+        await db.refresh(settings)
         return settings
-    if not create_if_missing:
+    except Exception as exc:
+        logger.warning("Could not fetch or initialize platform settings from DB: %s", exc)
         return PlatformSettings(id=1, **DEFAULT_PLATFORM_SETTINGS)
-    settings = PlatformSettings(id=1, **DEFAULT_PLATFORM_SETTINGS)
-    db.add(settings)
-    await db.commit()
-    await db.refresh(settings)
-    return settings
 
 
 def build_blocked_message(support_email: str) -> str:

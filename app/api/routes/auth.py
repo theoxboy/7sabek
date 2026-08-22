@@ -114,39 +114,42 @@ async def _mark_registration_lead_converted(
     normalized_email: str,
     user_id: UUID,
 ) -> None:
-    normalized = _safe_normalize_optional_email(normalized_email)
-    if not normalized:
-        return
-    lead: Optional[RegistrationLead] = None
-    if lead_id is not None:
-        lead_result = await db.execute(select(RegistrationLead).where(RegistrationLead.id == lead_id).limit(1))
-        candidate = lead_result.scalar_one_or_none()
-        if candidate is not None:
-            candidate_email = (candidate.normalized_email or "").strip().lower()
-            if (
-                candidate.status not in {"converted", "dismissed", "blocked"}
-                and (not candidate_email or candidate_email == normalized)
-            ):
-                lead = candidate
-    if lead is None:
-        result = await db.execute(
-            select(RegistrationLead)
-            .where(
-                RegistrationLead.normalized_email == normalized,
-                RegistrationLead.status.in_(["partial", "email_captured"]),
+    try:
+        normalized = _safe_normalize_optional_email(normalized_email)
+        if not normalized:
+            return
+        lead: Optional[RegistrationLead] = None
+        if lead_id is not None:
+            lead_result = await db.execute(select(RegistrationLead).where(RegistrationLead.id == lead_id).limit(1))
+            candidate = lead_result.scalar_one_or_none()
+            if candidate is not None:
+                candidate_email = (candidate.normalized_email or "").strip().lower()
+                if (
+                    candidate.status not in {"converted", "dismissed", "blocked"}
+                    and (not candidate_email or candidate_email == normalized)
+                ):
+                    lead = candidate
+        if lead is None:
+            result = await db.execute(
+                select(RegistrationLead)
+                .where(
+                    RegistrationLead.normalized_email == normalized,
+                    RegistrationLead.status.in_(["partial", "email_captured"]),
+                )
+                .order_by(RegistrationLead.created_at.desc())
+                .limit(1)
             )
-            .order_by(RegistrationLead.created_at.desc())
-            .limit(1)
-        )
-        lead = result.scalar_one_or_none()
-    if lead is None:
-        return
-    now = datetime.now(timezone.utc)
-    lead.status = "converted"
-    lead.converted_user_id = user_id
-    lead.converted_at = now
-    lead.last_seen_at = now
-    lead.updated_at = now
+            lead = result.scalar_one_or_none()
+        if lead is None:
+            return
+        now = datetime.now(timezone.utc)
+        lead.status = "converted"
+        lead.converted_user_id = user_id
+        lead.converted_at = now
+        lead.last_seen_at = now
+        lead.updated_at = now
+    except Exception as exc:
+        logger.warning("Could not mark lead as converted: %s", exc)
 
 
 def _email_domain(value: str) -> str:

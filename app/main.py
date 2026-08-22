@@ -58,6 +58,20 @@ def create_app() -> FastAPI:
     assets_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/email-assets", StaticFiles(directory=str(assets_dir)), name="email-assets")
 
+    @app.on_event("startup")
+    async def run_db_migrations_on_startup():
+        if not is_test_env:
+            try:
+                import asyncio
+                from alembic.config import Config
+                from alembic import command
+
+                alembic_cfg = Config("alembic.ini")
+                await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+                logging.getLogger("app.startup").info("Alembic database migrations applied successfully.")
+            except Exception as exc:
+                logging.getLogger("app.startup").warning("Alembic migrations on startup warning: %s", exc)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
