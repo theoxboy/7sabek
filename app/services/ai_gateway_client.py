@@ -566,11 +566,11 @@ async def _chat_completion_openai(
 
 
 def _resolve_timeout(settings: Any) -> float:
-    """Extract the request timeout from settings, defaulting to 60 s."""
-    timeout_ms_raw = 60000
+    """Extract the request timeout from settings, capped at 18s to avoid App Platform 504 timeouts."""
+    timeout_ms_raw = 18000
     ai_routing = settings.ai_routing if isinstance(settings.ai_routing, dict) else {}
     try:
-        timeout_ms_raw = int(ai_routing.get("request_timeout_ms") or 60000)
+        timeout_ms_raw = int(ai_routing.get("request_timeout_ms") or 18000)
     except Exception:
-        timeout_ms_raw = 60000
-    return max(1.0, min(float(timeout_ms_raw) / 1000.0, 120.0))
+        timeout_ms_raw = 18000
+    return max(1.0, min(float(timeout_ms_raw) / 1000.0, 20.0))
