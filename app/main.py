@@ -132,32 +132,37 @@ def create_app() -> FastAPI:
             path.startswith("/health")
             or path.startswith("/docs")
             or path.startswith("/openapi")
+            or path.startswith("/public")
         ):
             return await call_next(request)
 
-        SessionLocal = get_sessionmaker()
-        async with SessionLocal() as db:
-            if await is_ip_blocked(db, get_client_ip(request)):
-                platform_settings = await get_platform_settings(db, create_if_missing=True)
-                support_email = (platform_settings.support_email or "").strip()
-                message = (
-                    "Cette connexion est suspecte. Le système l'a bloquée automatiquement "
-                    "après détection d'une utilisation suspecte. Contacte le support."
-                )
-                if support_email:
-                    message = f"{message} ({support_email})"
-                response = JSONResponse(
-                    {
-                        "detail": "IP_ADDRESS_BLOCKED",
-                        "message": message,
-                    },
-                    status_code=403,
-                )
-                return _append_cors_headers(
-                    response,
-                    request.headers.get("origin", ""),
-                    allow_origin_regex,
-                )
+        try:
+            SessionLocal = get_sessionmaker()
+            async with SessionLocal() as db:
+                if await is_ip_blocked(db, get_client_ip(request)):
+                    platform_settings = await get_platform_settings(db, create_if_missing=False)
+                    support_email = (platform_settings.support_email or "").strip()
+                    message = (
+                        "Cette connexion est suspecte. Le système l'a bloquée automatiquement "
+                        "après détection d'une utilisation suspecte. Contacte le support."
+                    )
+                    if support_email:
+                        message = f"{message} ({support_email})"
+                    response = JSONResponse(
+                        {
+                            "detail": "IP_ADDRESS_BLOCKED",
+                            "message": message,
+                        },
+                        status_code=403,
+                    )
+                    return _append_cors_headers(
+                        response,
+                        request.headers.get("origin", ""),
+                        allow_origin_regex,
+                    )
+        except Exception as exc:
+            logging.getLogger("app.security").warning("ip_block_guard check error (failing open): %s", exc)
+
         return await call_next(request)
 
     @app.middleware("http")
@@ -179,25 +184,29 @@ def create_app() -> FastAPI:
         if path in {"/auth/login", "/auth/register"}:
             return await call_next(request)
 
-        SessionLocal = get_sessionmaker()
-        async with SessionLocal() as db:
-            platform_settings = await get_platform_settings(db, create_if_missing=True)
-            limit = platform_settings.rate_limit_api_max
-            window_seconds = platform_settings.rate_limit_api_window_minutes * 60
-            if limit > 0 and window_seconds > 0:
-                ip = get_client_ip(request)
-                result = await check_rate_limit(db, f"api:{ip}", limit, window_seconds)
-                if not result.allowed:
-                    response = JSONResponse(
-                        {"detail": build_rate_limit_message(result.retry_after)},
-                        status_code=429,
-                        headers={"Retry-After": str(result.retry_after)},
-                    )
-                    return _append_cors_headers(
-                        response,
-                        request.headers.get("origin", ""),
-                        allow_origin_regex,
-                    )
+        try:
+            SessionLocal = get_sessionmaker()
+            async with SessionLocal() as db:
+                platform_settings = await get_platform_settings(db, create_if_missing=False)
+                limit = platform_settings.rate_limit_api_max
+                window_seconds = platform_settings.rate_limit_api_window_minutes * 60
+                if limit > 0 and window_seconds > 0:
+                    ip = get_client_ip(request)
+                    result = await check_rate_limit(db, f"api:{ip}", limit, window_seconds)
+                    if not result.allowed:
+                        response = JSONResponse(
+                            {"detail": build_rate_limit_message(result.retry_after)},
+                            status_code=429,
+                            headers={"Retry-After": str(result.retry_after)},
+                        )
+                        return _append_cors_headers(
+                            response,
+                            request.headers.get("origin", ""),
+                            allow_origin_regex,
+                        )
+        except Exception as exc:
+            logging.getLogger("app.security").warning("api_rate_limit check error (failing open): %s", exc)
+
         return await call_next(request)
 
     @app.middleware("http")
@@ -205,8 +214,8 @@ def create_app() -> FastAPI:
         origin = request.headers.get("origin", "")
         try:
             response = await call_next(request)
-        except Exception:
-            logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        except Exception as exc:
+            logger.exception("Unhandled error on %s %s: %s", request.method, request.url.path, exc)
             response = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
         return _append_cors_headers(response, origin, allow_origin_regex)
 
