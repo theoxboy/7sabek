@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Optional
 from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -25,15 +26,15 @@ class AdminNotification(Base):
     message_ar: Mapped[str] = mapped_column(Text, nullable=False)
     notification_type: Mapped[str] = mapped_column(String(50), default="general", nullable=False)
     target_audience: Mapped[str] = mapped_column(String(50), default="all", nullable=False)
-    target_user_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    target_user_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     action_type: Mapped[str] = mapped_column(String(50), default="none", nullable=False)
-    action_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    action_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     haptic_effect: Mapped[str] = mapped_column(String(50), default="Success", nullable=False)
     priority: Mapped[str] = mapped_column(String(20), default="normal", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sent_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     read_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_by_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_by_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
 class AdminNotificationRead(Base):
