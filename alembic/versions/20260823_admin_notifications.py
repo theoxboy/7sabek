@@ -21,7 +21,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
-    tables = inspector.get_table_names()
+    tables = set(inspector.get_table_names())
 
     # 1. admin_notifications
     if 'admin_notifications' not in tables:
@@ -54,7 +54,7 @@ def upgrade() -> None:
             'admin_notification_reads',
             sa.Column('id', sa.Integer(), nullable=False),
             sa.Column('notification_id', sa.Integer(), nullable=False),
-            sa.Column('user_id', postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column('user_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('users.id', ondelete='CASCADE'), nullable=False),
             sa.Column('read_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
             sa.PrimaryKeyConstraint('id')
         )
@@ -66,7 +66,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
-    tables = inspector.get_table_names()
+    tables = set(inspector.get_table_names())
 
     if 'admin_notification_reads' in tables:
         op.drop_table('admin_notification_reads')
