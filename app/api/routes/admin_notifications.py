@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user
+from app.db.session import get_db
+from app.models import User
+from app.models.admin_notification import AdminNotification, AdminNotificationRead
+from app.schemas.admin_notification import (
+    AdminNotificationCreate,
+    AdminNotificationOut,
+    ClientBroadcastNotificationOut,
+)
+
+router = APIRouter(tags=["Notifications"])
+
+
+@router.get("/admin/notifications", response_model=List[AdminNotificationOut])
+async def list_admin_notifications(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin access required",
+        )
+
+    stmt = (
+        select(AdminNotification)
+        .order_by(desc(AdminNotification.created_at))
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.post("/admin/notifications", response_model=AdminNotificationOut)
+async def create_admin_notification(
+    payload: AdminNotificationCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin access required",
+        )
+
+    # Calculate total eligible users for this notification
+    count_stmt = select(func.count(User.id)).where(User.status == "active")
+    if payload.target_audience == "specific" and payload.target_user_email:
+        count_stmt = count_stmt.where(User.email == payload.target_user_email.strip().lower())
+    
+    count_res = await db.execute(count_stmt)
+    target_count = count_res.scalar() or 0
+
+    notification = AdminNotification(
+        title_fr=payload.title_fr.strip(),
+        title_ar=payload.title_ar.strip(),
+        message_fr=payload.message_fr.strip(),
+        message_ar=payload.message_ar.strip(),
+        notification_type=payload.notification_type,
+        target_audience=payload.target_audience,
+        target_user_email=payload.target_user_email.strip().lower() if payload.target_user_email else None,
+        action_type=payload.action_type,
+        action_url=payload.action_url.strip() if payload.action_url else None,
+        haptic_effect=payload.haptic_effect,
+        priority=payload.priority,
+        is_active=True,
+        sent_count=target_count,
+        read_count=0,
+        created_by_email=current_user.email,
+    )
+    db.add(notification)
+    await db.commit()
+    await db.refresh(notification)
+    return notification
+
+
+@router.patch("/admin/notifications/{notification_id}/toggle", response_model=AdminNotificationOut)
+async def toggle_admin_notification(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin access required",
+        )
+
+    result = await db.execute(select(AdminNotification).where(AdminNotification.id == notification_id))
+    notification = result.scalar_one_or_none()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    notification.is_active = not notification.is_active
+    await db.commit()
+    await db.refresh(notification)
+    return notification
+
+
+@router.delete("/admin/notifications/{notification_id}")
+async def delete_admin_notification(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin access required",
+        )
+
+    result = await db.execute(select(AdminNotification).where(AdminNotification.id == notification_id))
+    notification = result.scalar_one_or_none()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    await db.delete(notification)
+    await db.commit()
+    return {"ok": True, "deleted_id": notification_id}
+
+
+@router.get("/notifications/broadcasts", response_model=List[ClientBroadcastNotificationOut])
+async def get_client_broadcast_notifications(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns active broadcast notifications targeted to the logged-in user.
+    Translates title/message based on user's preferred language (or default FR).
+    """
+    # Fetch active notifications
+    stmt = (
+        select(AdminNotification)
+        .where(AdminNotification.is_active == True)
+        .order_by(desc(AdminNotification.created_at))
+        .limit(20)
+    )
+    result = await db.execute(stmt)
+    notifications = result.scalars().all()
+
+    # Fetch read notifications for this user
+    read_stmt = select(AdminNotificationRead.notification_id).where(
+        AdminNotificationRead.user_id == current_user.id
+    )
+    read_res = await db.execute(read_stmt)
+    read_ids = set(read_res.scalars().all())
+
+    # User language preference if available, default to FR
+    user_lang = (getattr(current_user, "language", None) or "fr").lower()
+
+    output: List[ClientBroadcastNotificationOut] = []
+    for n in notifications:
+        # Check targeting
+        if n.target_audience == "specific":
+            if not n.target_user_email or n.target_user_email.lower() != current_user.email.lower():
+                continue
+        elif n.target_audience == "lang_ar" and user_lang not in {"ar", "darija"}:
+            continue
+        elif n.target_audience == "lang_fr" and user_lang in {"ar", "darija"}:
+            continue
+
+        is_arabic = user_lang in {"ar", "darija"}
+        title = n.title_ar if is_arabic and n.title_ar else n.title_fr
+        message = n.message_ar if is_arabic and n.message_ar else n.message_fr
+
+        output.append(
+            ClientBroadcastNotificationOut(
+                id=n.id,
+                created_at=n.created_at,
+                title=title,
+                message=message,
+                notification_type=n.notification_type,
+                action_type=n.action_type,
+                action_url=n.action_url,
+                haptic_effect=n.haptic_effect,
+                priority=n.priority,
+                is_read=n.id in read_ids,
+            )
+        )
+
+    return output
+
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Marks a broadcast notification as read for the current user.
+    """
+    # Check if already read
+    read_check = await db.execute(
+        select(AdminNotificationRead).where(
+            AdminNotificationRead.notification_id == notification_id,
+            AdminNotificationRead.user_id == current_user.id,
+        )
+    )
+    if read_check.scalar_one_or_none():
+        return {"ok": True, "already_read": True}
+
+    # Add read entry
+    read_entry = AdminNotificationRead(
+        notification_id=notification_id,
+        user_id=current_user.id,
+    )
+    db.add(read_entry)
+
+    # Increment read count on the parent notification
+    parent_res = await db.execute(
+        select(AdminNotification).where(AdminNotification.id == notification_id)
+    )
+    parent = parent_res.scalar_one_or_none()
+    if parent:
+        parent.read_count += 1
+
+    await db.commit()
+    return {"ok": True, "notification_id": notification_id}

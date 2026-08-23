@@ -14,8 +14,8 @@ from app.core.config import get_settings
 from app.core.ip_block import is_ip_blocked
 from app.core.logging import configure_logging
 from app.core.platform_settings import get_platform_settings
-from app.core.rate_limit import build_rate_limit_message, check_rate_limit, get_client_ip
-from app.db.session import get_sessionmaker
+from app.db.base import Base
+from app.db.session import get_engine, get_sessionmaker
 
 
 def _append_cors_headers(response: JSONResponse, origin: str, allow_origin_regex: str) -> JSONResponse:
@@ -71,6 +71,13 @@ def create_app() -> FastAPI:
                 logging.getLogger("app.startup").info("Alembic database migrations applied successfully.")
             except Exception as exc:
                 logging.getLogger("app.startup").warning("Alembic migrations on startup warning: %s", exc)
+
+            try:
+                async with get_engine().begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                logging.getLogger("app.startup").info("SQLAlchemy tables synchronized successfully.")
+            except Exception as exc:
+                logging.getLogger("app.startup").warning("Database table sync warning: %s", exc)
 
     app.add_middleware(
         CORSMiddleware,

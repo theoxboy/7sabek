@@ -58,6 +58,11 @@ from app.schemas.distribution_rule import (
 )
 from app.schemas.goal import GoalCreate, GoalDistributeRequest, GoalOut, GoalUpdate
 from app.schemas.sweep import SweepRun, SweepRunOut, SweepOut, SweepPreviewItem
+from app.schemas.admin_notification import (
+    AdminNotificationCreate,
+    AdminNotificationOut,
+    ClientBroadcastNotificationOut,
+)
 from app.schemas.transaction import TransactionCreate, TransactionOut, TransactionUpdate
 from app.schemas.user import (
     UserCreate,
@@ -167,4 +172,7 @@ __all__ = [
     "ReportSpendingByEnvelopeOut",
     "ReportSummaryOut",
     "ReportTopLabelOut",
+    "AdminNotificationCreate",
+    "AdminNotificationOut",
+    "ClientBroadcastNotificationOut",
 ]

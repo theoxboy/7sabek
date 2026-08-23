@@ -27,6 +27,7 @@ from app.api.routes.email_center import router as email_center_router
 from app.api.routes.email_public import router as email_public_router
 from app.api.routes.registration_leads import router as registration_leads_router
 from app.api.routes.contact_messages import router as contact_messages_router
+from app.api.routes.admin_notifications import router as admin_notifications_router
 from app.api.routes.nlp import router as nlp_router
 from app.api.routes.ai import router as ai_router
 
@@ -39,6 +40,7 @@ api_router.include_router(analytics_router, tags=["analytics"])
 api_router.include_router(admin_activity_router, tags=["admin-activity"])
 api_router.include_router(admin_backups_router, tags=["admin-backups"])
 api_router.include_router(admin_settings_router, tags=["admin-settings"])
+api_router.include_router(admin_notifications_router, tags=["admin-notifications"])
 api_router.include_router(users_router, tags=["users"])
 api_router.include_router(envelopes_router, tags=["envelopes"])
 api_router.include_router(goals_router, tags=["goals"])
