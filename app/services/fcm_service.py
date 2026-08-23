@@ -60,19 +60,34 @@ _FALLBACK_SA_B64 = (
 )
 
 
+def _is_valid_sa(d: Optional[dict]) -> bool:
+    return bool(
+        d
+        and isinstance(d, dict)
+        and d.get("client_email")
+        and d.get("private_key")
+        and "BEGIN PRIVATE KEY" in str(d.get("private_key", ""))
+    )
+
+
 def _get_service_account_dict() -> Optional[dict]:
     import base64
     # Check env var first (raw or b64)
     raw_env = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("FIREBASE_SERVICE_ACCOUNT_B64")
     if raw_env:
         try:
-            return json.loads(raw_env)
+            d = json.loads(raw_env)
+            if _is_valid_sa(d):
+                return d
         except Exception:
-            try:
-                decoded = base64.b64decode(raw_env).decode("utf-8")
-                return json.loads(decoded)
-            except Exception:
-                pass
+            pass
+        try:
+            decoded = base64.b64decode(raw_env).decode("utf-8")
+            d = json.loads(decoded)
+            if _is_valid_sa(d):
+                return d
+        except Exception:
+            pass
 
     # Check local files
     candidates = [
@@ -84,14 +99,18 @@ def _get_service_account_dict() -> Optional[dict]:
         if path.exists():
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    d = json.load(f)
+                    if _is_valid_sa(d):
+                        return d
             except Exception as exc:
                 logger.warning("Error reading firebase service account file %s: %s", path, exc)
 
     # Use default built-in credentials
     try:
         decoded = base64.b64decode(_FALLBACK_SA_B64).decode("utf-8")
-        return json.loads(decoded)
+        d = json.loads(decoded)
+        if _is_valid_sa(d):
+            return d
     except Exception as exc:
         logger.warning("Error decoding default firebase credentials: %s", exc)
 

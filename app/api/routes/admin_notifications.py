@@ -339,3 +339,32 @@ async def register_device_token(
 
     return {"ok": True}
 
+
+@router.post("/notifications/test-fcm-dispatch")
+async def test_fcm_dispatch():
+    from app.services.fcm_service import send_fcm_broadcast, _get_service_account_dict, _get_fcm_access_token
+    sa = _get_service_account_dict()
+    if not sa:
+        return {"ok": False, "error": "No valid service account found"}
+    token = await _get_fcm_access_token(sa)
+    if not token:
+        return {"ok": False, "error": "Could not obtain OAuth2 token from Google"}
+
+    sent = await send_fcm_broadcast(
+        title_fr="Test Production Live",
+        title_ar="تجربة إنتاج مباشرة",
+        message_fr="Test automatique direct depuis le serveur de production",
+        message_ar="اختبار تلقائي مباشر من خادم الإنتاج",
+        action_type="dashboard",
+        haptic_effect="Success",
+        priority="high",
+        notification_id=77777,
+        topic="all_users",
+    )
+    return {
+        "ok": sent,
+        "client_email": sa.get("client_email"),
+        "project_id": sa.get("project_id"),
+        "oauth2_token_acquired": bool(token),
+    }
+
