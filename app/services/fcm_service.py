@@ -224,8 +224,21 @@ async def send_fcm_broadcast(
 
     sent_any = False
     async with httpx.AsyncClient(timeout=10.0) as client:
-        # Send to direct device tokens if present (zero propagation delay)
-        if tokens:
+        # Send to topic if specified (instant broadcast to all devices)
+        if topic:
+            try:
+                payload = build_message_payload("topic", topic)
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    logger.info("FCM v1 sent to topic [%s, ID=%s]", topic, notification_id)
+                    sent_any = True
+                else:
+                    logger.warning("FCM topic send error [%s]: %s", resp.status_code, resp.text)
+            except Exception as e:
+                logger.warning("FCM topic request exception: %s", e)
+
+        # Send to direct device tokens for targeted audiences
+        if tokens and not topic:
             for d_token in tokens:
                 if not d_token:
                     continue
@@ -239,18 +252,5 @@ async def send_fcm_broadcast(
                         logger.warning("FCM token send response [%s]: %s", resp.status_code, resp.text)
                 except Exception as e:
                     logger.warning("FCM token request exception: %s", e)
-
-        # Send to topic if specified and no tokens or explicitly requested
-        if topic:
-            try:
-                payload = build_message_payload("topic", topic)
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code == 200:
-                    logger.info("FCM v1 sent to topic [%s, ID=%s]", topic, notification_id)
-                    sent_any = True
-                else:
-                    logger.warning("FCM topic send error [%s]: %s", resp.status_code, resp.text)
-            except Exception as e:
-                logger.warning("FCM topic request exception: %s", e)
 
     return sent_any

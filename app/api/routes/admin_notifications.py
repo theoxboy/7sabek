@@ -118,8 +118,8 @@ async def create_admin_notification(
             haptic_effect=notification.haptic_effect,
             priority=notification.priority,
             notification_id=notification.id,
-            topic=fcm_topic if (not device_tokens and fcm_topic) else None,
-            tokens=device_tokens if device_tokens else None,
+            topic=fcm_topic,
+            tokens=device_tokens if (device_tokens and not fcm_topic) else None,
         )
     except Exception as exc:
         import logging
