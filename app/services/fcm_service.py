@@ -205,12 +205,15 @@ async def send_fcm_broadcast(
                     "priority": priority or "normal",
                 },
                 "android": {
-                    "priority": "HIGH" if priority == "high" else "NORMAL",
+                    "priority": "HIGH",
+                    "direct_boot_ok": True,
                     "notification": {
                         "channel_id": "channel_admin_broadcast",
                         "sound": "default",
                         "default_vibrate_timings": True,
                         "default_light_settings": True,
+                        "notification_priority": "PRIORITY_MAX",
+                        "visibility": "PUBLIC",
                     },
                 },
             }
