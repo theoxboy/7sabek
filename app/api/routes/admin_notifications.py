@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_user_optional
 from app.db.session import get_db
 from app.models import User
 from app.models.admin_notification import AdminNotification, AdminNotificationRead
@@ -131,11 +131,11 @@ async def delete_admin_notification(
 
 @router.get("/notifications/broadcasts", response_model=List[ClientBroadcastNotificationOut])
 async def get_client_broadcast_notifications(
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Returns active broadcast notifications targeted to the logged-in user.
+    Returns active broadcast notifications targeted to the logged-in user (or general audience).
     Translates title/message based on user's preferred language (or default FR).
     """
     # Fetch active notifications
@@ -143,26 +143,29 @@ async def get_client_broadcast_notifications(
         select(AdminNotification)
         .where(AdminNotification.is_active == True)
         .order_by(desc(AdminNotification.created_at))
-        .limit(20)
+        .limit(30)
     )
     result = await db.execute(stmt)
     notifications = result.scalars().all()
 
-    # Fetch read notifications for this user
-    read_stmt = select(AdminNotificationRead.notification_id).where(
-        AdminNotificationRead.user_id == current_user.id
-    )
-    read_res = await db.execute(read_stmt)
-    read_ids = set(read_res.scalars().all())
-
-    # User language preference if available, default to FR
-    user_lang = (getattr(current_user, "language", None) or "fr").lower()
+    # Fetch read notifications for this user if logged in
+    read_ids: set[int] = set()
+    user_lang = "fr"
+    user_email = ""
+    if current_user is not None:
+        read_stmt = select(AdminNotificationRead.notification_id).where(
+            AdminNotificationRead.user_id == current_user.id
+        )
+        read_res = await db.execute(read_stmt)
+        read_ids = set(read_res.scalars().all())
+        user_lang = (getattr(current_user, "language", None) or "fr").lower()
+        user_email = (current_user.email or "").lower()
 
     output: List[ClientBroadcastNotificationOut] = []
     for n in notifications:
         # Check targeting
         if n.target_audience == "specific":
-            if not n.target_user_email or n.target_user_email.lower() != current_user.email.lower():
+            if not user_email or not n.target_user_email or n.target_user_email.lower() != user_email:
                 continue
         elif n.target_audience == "lang_ar" and user_lang not in {"ar", "darija"}:
             continue
@@ -194,29 +197,12 @@ async def get_client_broadcast_notifications(
 @router.post("/notifications/{notification_id}/read")
 async def mark_notification_read(
     notification_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_current_user_optional),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Marks a broadcast notification as read for the current user.
+    Marks a broadcast notification as read for the user.
     """
-    # Check if already read
-    read_check = await db.execute(
-        select(AdminNotificationRead).where(
-            AdminNotificationRead.notification_id == notification_id,
-            AdminNotificationRead.user_id == current_user.id,
-        )
-    )
-    if read_check.scalar_one_or_none():
-        return {"ok": True, "already_read": True}
-
-    # Add read entry
-    read_entry = AdminNotificationRead(
-        notification_id=notification_id,
-        user_id=current_user.id,
-    )
-    db.add(read_entry)
-
     # Increment read count on the parent notification
     parent_res = await db.execute(
         select(AdminNotification).where(AdminNotification.id == notification_id)
@@ -224,6 +210,20 @@ async def mark_notification_read(
     parent = parent_res.scalar_one_or_none()
     if parent:
         parent.read_count += 1
+
+    if current_user is not None:
+        read_check = await db.execute(
+            select(AdminNotificationRead).where(
+                AdminNotificationRead.notification_id == notification_id,
+                AdminNotificationRead.user_id == current_user.id,
+            )
+        )
+        if not read_check.scalar_one_or_none():
+            read_entry = AdminNotificationRead(
+                notification_id=notification_id,
+                user_id=current_user.id,
+            )
+            db.add(read_entry)
 
     await db.commit()
     return {"ok": True, "notification_id": notification_id}
