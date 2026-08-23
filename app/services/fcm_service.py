@@ -187,14 +187,11 @@ async def send_fcm_broadcast(
         return {
             "message": {
                 target_key: target_val,
-                "notification": {
-                    "title": display_title,
-                    "body": display_body,
-                },
                 "data": {
                     "id": str(notification_id),
                     "title": display_title,
                     "message": display_body,
+                    "body": display_body,
                     "title_fr": title_fr or "",
                     "title_ar": title_ar or "",
                     "message_fr": message_fr or "",
@@ -207,14 +204,6 @@ async def send_fcm_broadcast(
                 "android": {
                     "priority": "HIGH",
                     "direct_boot_ok": True,
-                    "notification": {
-                        "channel_id": "channel_admin_broadcast_v2",
-                        "sound": "default",
-                        "default_vibrate_timings": True,
-                        "default_light_settings": True,
-                        "notification_priority": "PRIORITY_MAX",
-                        "visibility": "PUBLIC",
-                    },
                 },
             }
         }
