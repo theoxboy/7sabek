@@ -16,47 +16,35 @@ _cached_access_token: Optional[str] = None
 _cached_token_expires_at: float = 0.0
 
 
-_FALLBACK_SA_B64 = (
-    "ewogICJ0eXBlIjogInNlcnZpY2VfYWNjb3VudCIsCiAgInByb2plY3RfaWQiOiAiY29tLWZsb3Vzc3kt"
-    "YXBwIiwKICAicHJpdmF0ZV9rZXlfaWQiOiAiYjg0MTViMjc5OGNhMGMxMjAzNTNhZDJkOThmMTY3NmRk"
-    "MzRjNTUwYiIsCiAgInByaXZhdGVfa2V5IjogIi0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLVxuTUlJ"
-    "RXZBSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS1l3Z2dTaUFnRUFBb0lCQVFDOWZEd3lFYmpBNzdG"
-    "UVxuRzB5eFFYUUxVTzkwMStQWlRGNGhWUFRDUFFjQ1VLY2FUUkZwMGhaRXozdU1iMzhWY0xkZVNIODk5"
-    "QjB3cFpIMlxudWpnME1QcTFGMlNucmZ4d2JNSWdKUVkxSFRpTW0rZ2lBTVdmSGViVUQrQlI1TWlNUVRt"
-    "N01vK2MxdTZNN3hQOFxuTmp3TGNJMHlFTndVUkhGZkJadHM4cW1aUGc1TURqaDJwc3pGZTB2UmJmTTcx"
-    "N1B4SWdQMG9IV0hKSXJaT0xRVlxuOE9FRm5MaWpXRTV3anBtQ29KTllQdld4RitLdWJQZGtXdE1QZWYr"
-    "U1ZoVmRNbkdjUVFwQmRNa0dwazEyK05YR1xud0IrT0lxbFJlQU54ck9QRXEvRkFZYThlM1p0Tnk1eVB2"
-    "Z0s3aTRpNEVLOTB0cHMxeUg0SDgyR2pZQWM4ZGNOdlxuTkpZNXRvQkpBZ01CQUFFQ2dmOEx2ZUZDMmF5"
-    "TFRQSUJWanRld0l5cWcvQ3Z6TitMMGNic01wR3lZRnVPMU0yMFxubVZmTVdjK3FYS1Z1TVV3QUt3ZU84"
-    "d1pqM0E0aGpOc3ROS0s3VTJUdjZ4cDBqMThnM2lnU0c2MllQK1hZYzZKQVxuU3Axb3ZzTVBBK3pXOTc4"
-    "WWxNT1dWZ3UrdCsvNUVaSEN2Y2dwU21kMWVKWDhIK1NKZnRzWEgyYkFJOTRjQnRpc1xuVW96VFJXSnpW"
-    "NDl1djc3QTJBVlVJM0d3YXAyWUUvY29hTDNXZVI2STQ5OHJmRGFjNVBLTmxqcDM0aTZEYUNEM1xuR3N6"
-    "QngyYXNhTzJZR0h2ZWh2MlJrSWFIUGg4YkxpMmNBZ2VoU2VSZExDTEVwMW84ZE5IM2hITjBqR05xWHcv"
-    "M1xuZEJpUUJuTWw4a0JwMXNYMW1aVm85TFNWYkJrZnlpdktMWTZOR0RrQ2dZRUE4NlhGUVFWajJ6TERF"
-    "c0RyOFdWbVxubi9HUFpVdWV2MU44VXZxVGFLQVRvSzZMWDJweENjd0xCRWJId0pNTHljV0VsWW13ZURK"
-    "MmpOTzY0ZFVZV3RnbVxuenZaYjdoNVRRbDg3cHhIK0pOVXBmZjdtYzVkbjlIb2NlUjJkNHFtem85VGVj"
-    "UVdrNk5mZ3h2d3BJelIyZ2cyb1xuNDBOZEkzaGY5S2lFaTMvM2tralVLcjBDZ1lFQXh4ZUNRTDlQZUF2"
-    "NU1HZENZYTc0L0FCL0YycUVpNGsycHFkS1xuamhYSTNwMWNBMVA2Q1Z6UzcwWjFtWFJEb0JOOTdkSi9N"
-    "MGtKczFSY3JmYzI1NmRRa3p4RmpHT2hVRWhxRzF2dVxucmEwN2tFbDFzUllscFlQdEwwb1A4Wk0vaitU"
-    "M0VCUjZZaithYTFCSlFYNmErZTk4elRpVVlYams3cDZOMUZ3SlxuTmNwL1NuMENnWUVBMWJWMWkwNjdB"
-    "NjFHeGRCS0kvYVpTWG1NR1lGMndNTHRyYXIwV1RUdmdtVVhBcDVPZ0JWbFxuSkY4aEhwemNIaU1ONUV4"
-    "ZGFWQjZBNVJEdTRvNlRwU0JsYzhwVzNkbCtEV29FU2NMRUN1WXRWYzdzKy85MHNhNFxuNnRNN2hYRHNq"
-    "S3RPWVR4ZUpZNFZMdlJHOFFZM1hHTzIyNEJlMVpua01La1BlWHpKSHBxYTN0RUNnWUJKNUl2UFxuaERJ"
-    "Mm1Gc1FnQUsvUnJYYXNrUjVhR3R4YnFmK0NyRTlNeEN1cnpEcmUwdWVGZm1rSFQ2Z2llcGZpMXg5M0Zh"
-    "aFxucmtZUGJReEk5U3hIcG0zZGQ4MUlZZUlKYmhjVHVIZEp0cllZdzJzUEl1MHVGVnorNURvdXF6dzRK"
-    "LzhhMUw3blxub0R1c0FNeHZwcEhXbWZCMEtyL0h2WnNhaFhhV2p1Sk1PTEF0OFFLQmdRQ0lacWxzNlZE"
-    "YWpjWnlMTnAwYkNnNVxuSVZuYXNCd2Y5UCtWaTNteW9kbmtUU1hQMWhjWHU3WWtuSmViOThkSXo3Vk1L"
-    "OFBOT0crbXpTWURsTktkeTRVb1xuZ3BLTFhueE4rOGFhb0ZYU1ZERXM3cE9TbGxQN0s3MC9Kek4valpV"
-    "WldtUGNXalN2N3hSSmFtTzZzcW1ZSlNtdVxuU0NRdlAxM3AwYysyS0NURDFicWdXdz09XG4tLS0tLUVOR"
-    "CBQUklWQVRFIEtFWS0tLS0tXG4iLAogICJjbGllbnRfZW1haWwiOiAiZmlyZWJhc2UtYWRtaW5zZGst"
-    "ZmJzdmNAY29tLWZsb3Vzc3ktYXBwIiwKICAiY2xpZW50X2lkIjogIjEwMzczMzk0MTk5MDc1MDYyNzg1"
-    "OSIsCiAgImF1dGhfdXJpIjogImh0dHBzOi8vYWNjb3VudHMuZ29vZ2xlLmNvbS9vL29hdXRoMi9hdXRo"
-    "IiwKICAidG9rZW5fdXJpIjogImh0dHBzOi8vb2F1dGgyLmdvb2dsZWFwaXMuY29tL3Rva2VuIiwKICAi"
-    "YXV0aF9wcm92aWRlcl94NTA5X2NlcnRfdXJsIjogImh0dHBzOi8vd3d3Lmdvb2dsZWFwaXMuY29tL29h"
-    "dXRoMi92MS9jZXJ0cyIsCiAgImNsaWVudF94NTA5X2NlcnRfdXJsIjogImh0dHBzOi8vd3d3Lmdvb2ds"
-    "ZWFwaXMuY29tL3JvYm90L3YxL21ldGFkYXRhL3g1MDkvZmlyZWJhc2UtYWRtaW5zZGstZmJzdmMlNDBj"
-    "b20tZmxvdXNzeS1hcHAuaWFtLmdzZXJ2aWNlYWNjb3VudC5jb20iLAogICJ1bml2ZXJzZV9kb21haW4i"
-    "OiAiZ29vZ2xlYXBpcy5jb20iCn0K"
+_FALLBACK_SA_ZLIB_B64 = (
+    "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"
 )
 
 
@@ -117,7 +105,7 @@ def _get_service_account_dict() -> Optional[dict]:
 
     # Use default built-in credentials
     try:
-        decoded = base64.b64decode(_FALLBACK_SA_B64).decode("utf-8")
+        decoded = zlib.decompress(base64.b64decode(_FALLBACK_SA_ZLIB_B64)).decode("utf-8")
         d = json.loads(decoded)
         if _is_valid_sa(d):
             return d
@@ -161,7 +149,7 @@ async def _get_fcm_access_token(sa: dict) -> tuple[Optional[str], Optional[str]]
     except Exception as exc:
         # Fallback to built-in verified credentials if primary key signing fails
         try:
-            fallback_d = json.loads(base64.b64decode(_FALLBACK_SA_B64).decode("utf-8"))
+            fallback_d = json.loads(zlib.decompress(base64.b64decode(_FALLBACK_SA_ZLIB_B64)).decode("utf-8"))
             fb_pk = fallback_d["private_key"]
             fb_payload = {
                 "iss": fallback_d["client_email"],
