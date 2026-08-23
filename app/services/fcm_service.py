@@ -208,7 +208,7 @@ async def send_fcm_broadcast(
                     "priority": "HIGH",
                     "direct_boot_ok": True,
                     "notification": {
-                        "channel_id": "channel_admin_broadcast",
+                        "channel_id": "channel_admin_broadcast_v2",
                         "sound": "default",
                         "default_vibrate_timings": True,
                         "default_light_settings": True,
