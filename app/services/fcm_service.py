@@ -186,13 +186,6 @@ async def _get_fcm_access_token(sa: dict) -> tuple[Optional[str], Optional[str]]
     except Exception as exc:
         return None, f"HTTP exception requesting Google OAuth token: {exc}"
 
-        token_data = resp.json()
-        access_token = token_data.get("access_token")
-        expires_in = token_data.get("expires_in", 3600)
-        _cached_access_token = access_token
-        _cached_token_expires_at = now + float(expires_in)
-        return access_token
-
 
 async def send_fcm_broadcast(
     title_fr: str,
@@ -235,22 +228,9 @@ async def send_fcm_broadcast(
         return {
             "message": {
                 target_key: target_val,
-                "notification": {
-                    "title": display_title,
-                    "body": display_body,
-                },
                 "android": {
                     "priority": "HIGH",
                     "direct_boot_ok": True,
-                    "notification": {
-                        "channel_id": "channel_admin_broadcast_v2",
-                        "sound": "default",
-                        "default_sound": True,
-                        "default_vibrate_timings": True,
-                        "notification_priority": "PRIORITY_MAX",
-                        "visibility": "PUBLIC",
-                        "icon": "ic_launcher",
-                    },
                 },
                 "data": {
                     "id": str(notification_id),
