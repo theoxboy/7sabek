@@ -72,6 +72,57 @@ def create_app() -> FastAPI:
             except Exception as exc:
                 logging.getLogger("app.startup").warning("Alembic migrations on startup warning: %s", exc)
 
+            # Auto-healing: Ensure notification & device_tokens tables are created if Alembic was bypassed
+            try:
+                from sqlalchemy import text
+                SessionLocal = get_sessionmaker()
+                async with SessionLocal() as session:
+                    await session.execute(text("""
+                        CREATE TABLE IF NOT EXISTS admin_notifications (
+                            id SERIAL PRIMARY KEY,
+                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+                            title_fr VARCHAR(255) NOT NULL,
+                            title_ar VARCHAR(255) NOT NULL,
+                            message_fr TEXT NOT NULL,
+                            message_ar TEXT NOT NULL,
+                            notification_type VARCHAR(50) DEFAULT 'general' NOT NULL,
+                            target_audience VARCHAR(50) DEFAULT 'all' NOT NULL,
+                            target_user_email VARCHAR(255),
+                            action_type VARCHAR(50) DEFAULT 'none' NOT NULL,
+                            action_url VARCHAR(500),
+                            haptic_effect VARCHAR(50) DEFAULT 'Success' NOT NULL,
+                            priority VARCHAR(20) DEFAULT 'normal' NOT NULL,
+                            is_active BOOLEAN DEFAULT TRUE NOT NULL,
+                            sent_count INTEGER DEFAULT 0 NOT NULL,
+                            read_count INTEGER DEFAULT 0 NOT NULL,
+                            created_by_email VARCHAR(255)
+                        );
+                    """))
+                    await session.execute(text("""
+                        CREATE TABLE IF NOT EXISTS admin_notification_reads (
+                            id SERIAL PRIMARY KEY,
+                            notification_id INTEGER REFERENCES admin_notifications(id) ON DELETE CASCADE NOT NULL,
+                            user_id UUID REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+                            read_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+                            CONSTRAINT uq_user_notification_read UNIQUE (notification_id, user_id)
+                        );
+                    """))
+                    await session.execute(text("""
+                        CREATE TABLE IF NOT EXISTS device_tokens (
+                            id SERIAL PRIMARY KEY,
+                            token VARCHAR(500) UNIQUE NOT NULL,
+                            user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                            user_email VARCHAR(255),
+                            platform VARCHAR(50) DEFAULT 'android' NOT NULL,
+                            language VARCHAR(10) DEFAULT 'fr' NOT NULL,
+                            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+                        );
+                    """))
+                    await session.commit()
+                    logging.getLogger("app.startup").info("Notification tables verified successfully.")
+            except Exception as exc:
+                logging.getLogger("app.startup").warning("Error verifying notification tables on startup: %s", exc)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[

@@ -296,6 +296,20 @@ async def register_device_token(
         raise HTTPException(status_code=400, detail="Empty device token")
 
     try:
+        from sqlalchemy import text
+        await db.execute(text("""
+            CREATE TABLE IF NOT EXISTS device_tokens (
+                id SERIAL PRIMARY KEY,
+                token VARCHAR(500) UNIQUE NOT NULL,
+                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                user_email VARCHAR(255),
+                platform VARCHAR(50) DEFAULT 'android' NOT NULL,
+                language VARCHAR(10) DEFAULT 'fr' NOT NULL,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+            );
+        """))
+        await db.commit()
+
         res = await db.execute(select(DeviceToken).where(DeviceToken.token == token_str))
         existing = res.scalar_one_or_none()
 
