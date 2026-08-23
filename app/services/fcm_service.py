@@ -157,7 +157,8 @@ async def send_fcm_broadcast(
     haptic_effect: str = "Success",
     priority: str = "normal",
     notification_id: int = 0,
-    topic: str = "all_users",
+    topic: Optional[str] = "all_users",
+    tokens: Optional[list[str]] = None,
 ) -> bool:
     """
     Sends a real-time FCM v1 push notification directly through Google Play Services.
@@ -182,47 +183,68 @@ async def send_fcm_broadcast(
     display_title = title_fr if title_fr else title_ar
     display_body = message_fr if message_fr else message_ar
 
-    fcm_payload = {
-        "message": {
-            "topic": topic,
-            "notification": {
-                "title": display_title,
-                "body": display_body,
-            },
-            "data": {
-                "id": str(notification_id),
-                "title": display_title,
-                "message": display_body,
-                "title_fr": title_fr or "",
-                "title_ar": title_ar or "",
-                "message_fr": message_fr or "",
-                "message_ar": message_ar or "",
-                "action_type": action_type or "none",
-                "action_url": action_url or "",
-                "haptic_effect": haptic_effect or "Success",
-                "priority": priority or "normal",
-            },
-            "android": {
-                "priority": "HIGH" if priority == "high" else "NORMAL",
+    def build_message_payload(target_key: str, target_val: str) -> dict:
+        return {
+            "message": {
+                target_key: target_val,
                 "notification": {
-                    "channel_id": "channel_admin_broadcast",
-                    "sound": "default",
-                    "default_vibrate_timings": True,
-                    "default_light_settings": True,
+                    "title": display_title,
+                    "body": display_body,
                 },
-            },
+                "data": {
+                    "id": str(notification_id),
+                    "title": display_title,
+                    "message": display_body,
+                    "title_fr": title_fr or "",
+                    "title_ar": title_ar or "",
+                    "message_fr": message_fr or "",
+                    "message_ar": message_ar or "",
+                    "action_type": action_type or "none",
+                    "action_url": action_url or "",
+                    "haptic_effect": haptic_effect or "Success",
+                    "priority": priority or "normal",
+                },
+                "android": {
+                    "priority": "HIGH" if priority == "high" else "NORMAL",
+                    "notification": {
+                        "channel_id": "channel_admin_broadcast",
+                        "sound": "default",
+                        "default_vibrate_timings": True,
+                        "default_light_settings": True,
+                    },
+                },
+            }
         }
-    }
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, headers=headers, json=fcm_payload)
-            if resp.status_code == 200:
-                logger.info("FCM v1 push sent successfully [ID=%s, Topic=%s]: %s", notification_id, topic, resp.text)
-                return True
-            else:
-                logger.warning("FCM v1 push returned non-200 [%s]: %s", resp.status_code, resp.text)
-                return False
-    except Exception as exc:
-        logger.warning("FCM v1 push request error: %s", exc)
-        return False
+    sent_any = False
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # Send to direct device tokens if present (zero propagation delay)
+        if tokens:
+            for d_token in tokens:
+                if not d_token:
+                    continue
+                try:
+                    payload = build_message_payload("token", d_token)
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        logger.info("FCM v1 sent to direct token [ID=%s]: %s", notification_id, d_token[:15])
+                        sent_any = True
+                    else:
+                        logger.warning("FCM token send error [%s]: %s", resp.status_code, resp.text)
+                except Exception as e:
+                    logger.warning("FCM token request exception: %s", e)
+
+        # Also send to topic
+        if topic:
+            try:
+                payload = build_message_payload("topic", topic)
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    logger.info("FCM v1 sent to topic [%s, ID=%s]", topic, notification_id)
+                    sent_any = True
+                else:
+                    logger.warning("FCM topic send error [%s]: %s", resp.status_code, resp.text)
+            except Exception as e:
+                logger.warning("FCM topic request exception: %s", e)
+
+    return sent_any

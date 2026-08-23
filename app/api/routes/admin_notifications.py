@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_current_user_optional
 from app.db.session import get_db
 from app.models import User
-from app.models.admin_notification import AdminNotification, AdminNotificationRead
+from app.models.admin_notification import AdminNotification, AdminNotificationRead, DeviceToken
 from app.schemas.admin_notification import (
     AdminNotificationCreate,
     AdminNotificationOut,
@@ -82,7 +82,19 @@ async def create_admin_notification(
     await db.commit()
     await db.refresh(notification)
 
-    # Dispatch real-time FCM push notification
+    # Query registered device tokens
+    token_stmt = select(DeviceToken.token)
+    if payload.target_audience == "specific" and payload.target_user_email:
+        token_stmt = token_stmt.where(DeviceToken.user_email == payload.target_user_email.strip().lower())
+    elif payload.target_audience == "lang_ar":
+        token_stmt = token_stmt.where(DeviceToken.language.in_(["ar", "darija"]))
+    elif payload.target_audience == "lang_fr":
+        token_stmt = token_stmt.where(DeviceToken.language == "fr")
+    
+    token_res = await db.execute(token_stmt)
+    device_tokens = list(token_res.scalars().all())
+
+    # Dispatch real-time FCM push notification directly to devices & topic
     from app.services.fcm_service import send_fcm_broadcast
     await send_fcm_broadcast(
         title_fr=notification.title_fr,
@@ -94,6 +106,7 @@ async def create_admin_notification(
         haptic_effect=notification.haptic_effect,
         priority=notification.priority,
         notification_id=notification.id,
+        tokens=device_tokens,
     )
 
     return notification
@@ -242,3 +255,49 @@ async def mark_notification_read(
 
     await db.commit()
     return {"ok": True, "notification_id": notification_id}
+
+
+from pydantic import BaseModel
+
+
+class RegisterDeviceTokenRequest(BaseModel):
+    token: str
+    platform: str = "android"
+    language: str = "fr"
+
+
+@router.post("/notifications/register-device")
+async def register_device_token(
+    payload: RegisterDeviceTokenRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Registers or refreshes a device FCM push token in the database.
+    """
+    token_str = payload.token.strip()
+    if not token_str:
+        raise HTTPException(status_code=400, detail="Empty device token")
+
+    res = await db.execute(select(DeviceToken).where(DeviceToken.token == token_str))
+    existing = res.scalar_one_or_none()
+
+    if existing:
+        if current_user:
+            existing.user_id = current_user.id
+            existing.user_email = current_user.email
+        existing.platform = payload.platform
+        existing.language = payload.language
+    else:
+        new_token = DeviceToken(
+            token=token_str,
+            user_id=current_user.id if current_user else None,
+            user_email=current_user.email if current_user else None,
+            platform=payload.platform,
+            language=payload.language,
+        )
+        db.add(new_token)
+
+    await db.commit()
+    return {"ok": True}
+

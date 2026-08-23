@@ -62,11 +62,31 @@ def upgrade() -> None:
         op.create_index(op.f('ix_admin_notification_reads_notification_id'), 'admin_notification_reads', ['notification_id'], unique=False)
         op.create_index(op.f('ix_admin_notification_reads_user_id'), 'admin_notification_reads', ['user_id'], unique=False)
 
+    # 3. device_tokens
+    if 'device_tokens' not in tables:
+        op.create_table(
+            'device_tokens',
+            sa.Column('id', sa.Integer(), nullable=False),
+            sa.Column('token', sa.String(length=500), nullable=False),
+            sa.Column('user_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('users.id', ondelete='CASCADE'), nullable=True),
+            sa.Column('user_email', sa.String(length=255), nullable=True),
+            sa.Column('platform', sa.String(length=50), nullable=False, server_default='android'),
+            sa.Column('language', sa.String(length=10), nullable=False, server_default='fr'),
+            sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+            sa.PrimaryKeyConstraint('id')
+        )
+        op.create_index(op.f('ix_device_tokens_id'), 'device_tokens', ['id'], unique=False)
+        op.create_index(op.f('ix_device_tokens_token'), 'device_tokens', ['token'], unique=True)
+        op.create_index(op.f('ix_device_tokens_user_id'), 'device_tokens', ['user_id'], unique=False)
+
 
 def downgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
     tables = set(inspector.get_table_names())
+
+    if 'device_tokens' in tables:
+        op.drop_table('device_tokens')
 
     if 'admin_notification_reads' in tables:
         op.drop_table('admin_notification_reads')

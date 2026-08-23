@@ -53,3 +53,25 @@ class AdminNotificationRead(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class DeviceToken(Base):
+    __tablename__ = "device_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    token: Mapped[str] = mapped_column(String(500), unique=True, index=True, nullable=False)
+    user_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    user_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    platform: Mapped[str] = mapped_column(String(50), default="android", nullable=False)
+    language: Mapped[str] = mapped_column(String(10), default="fr", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
