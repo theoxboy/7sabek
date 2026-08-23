@@ -630,6 +630,64 @@ def insert_envelope_period_with_movement(
     return asyncio.run(_insert())
 
 
+def test_force_close_early_payday_on_period_start_day(
+    client: TestClient, database_url: str
+) -> None:
+    """Regression test: declaring an early salary on the very day the current
+    period started must not fail.
+
+    force_close_current_cycle truncates every active period to early_date. It
+    selected them with period_start <= early_date, so a period beginning on
+    early_date itself was truncated to period_end == period_start, which
+    ck_env_period_date_range rejects - the declaration came back as a 500. This
+    is reachable whenever a user declares a salary twice on the same day, which
+    is exactly what the first income of a fresh account sets up.
+    """
+    user = create_user(client, "early-payday-same-day@example.com", sweep_days=30)
+    user_id = user["id"]
+
+    anchor_date = date(2026, 6, 1)
+    set_user_anchor_date(database_url, user_id, anchor_date)
+    insert_onboarding_record(database_url, user_id, {"sweep_anchor_date": "2026-06-01"})
+
+    envelope = create_envelope(client, user_id, "Food")
+    category = create_category(client, user_id, "Food Expense")
+    map_category(client, user_id, category["id"], envelope["id"])
+    income_category = create_category(client, user_id, "income_salary")
+
+    # First salary: opens the period that starts on this very date.
+    first = client.post(
+        "/transactions",
+        json={
+            "type": "income",
+            "category_id": income_category["id"],
+            "amount": "2100.00",
+            "occurred_on": "2026-06-01",
+            "description": "Salary",
+        },
+    )
+    assert first.status_code == 201
+
+    # Second salary the same day, declared as an early payday. The period to
+    # close began today, so there is no elapsed cycle to truncate.
+    for shift in (False, True):
+        response = client.post(
+            "/transactions",
+            json={
+                "type": "income",
+                "category_id": income_category["id"],
+                "amount": "2100.00",
+                "occurred_on": "2026-06-01",
+                "description": "Early salary same day",
+                "permanent_shift": shift,
+            },
+        )
+        assert response.status_code == 201, (
+            f"permanent_shift={shift} on the period start day returned "
+            f"{response.status_code}: {response.text}"
+        )
+
+
 def test_force_close_sweeps_every_envelope_even_with_divergent_period_start(
     client: TestClient, database_url: str
 ) -> None:

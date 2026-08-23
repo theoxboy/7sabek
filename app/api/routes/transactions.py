@@ -82,18 +82,28 @@ async def create_transaction(
         payload.permanent_shift,
     )
 
-    result = await db.execute(
-        select(Transaction)
-        .options(selectinload(Transaction.envelope_movement))
-        .where(Transaction.id == transaction.id)
-    )
+    # Read while the instance is still loaded. Sweeping commits, a commit
+    # expires every ORM instance, and reading an expired attribute afterwards
+    # needs a lazy reload that raises under async SQLAlchemy rather than
+    # reloading - so this id would be unreadable once the sweeps have run.
+    transaction_id = transaction.id
+    user_id = current_user.id
+
     try:
         await run_due_sweeps(db, current_user, to_local_date(datetime.now(timezone.utc)))
     except Exception:
         logger.exception(
             "auto_sweep_failed_on_transaction_create",
-            extra={"user_id": str(current_user.id), "transaction_id": str(transaction.id)},
+            extra={"user_id": str(user_id), "transaction_id": str(transaction_id)},
         )
+
+    # Loaded after the sweeps rather than before, so the object handed to the
+    # response serialiser is live instead of expired.
+    result = await db.execute(
+        select(Transaction)
+        .options(selectinload(Transaction.envelope_movement))
+        .where(Transaction.id == transaction_id)
+    )
     return result.scalar_one()
 
 

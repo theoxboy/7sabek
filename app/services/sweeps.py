@@ -70,7 +70,20 @@ async def _resolve_force_period_start(
     return as_of - timedelta(days=sweep_interval_days)
 
 
-async def run_sweep(db: AsyncSession, user: User, as_of: date, force: bool = False) -> tuple[int, int]:
+async def run_sweep(
+    db: AsyncSession,
+    user: User,
+    as_of: date,
+    force: bool = False,
+    commit: bool = True,
+) -> tuple[int, int]:
+    """Sweep the balances of a closing period into savings.
+
+    Pass commit=False when this runs as one step of a larger operation. A
+    commit expires every ORM instance in the session, so committing mid-request
+    leaves objects the caller still holds - the user row in particular - needing
+    a lazy reload, which raises under async SQLAlchemy instead of reloading.
+    """
     anchor = await resolve_user_sweep_anchor_date(db, user)
     if force:
         period_start = None  # resolved per envelope below
@@ -171,7 +184,10 @@ async def run_sweep(db: AsyncSession, user: User, as_of: date, force: bool = Fal
         period.swept_at = datetime.now(timezone.utc)
         periods_swept += 1
 
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return periods_swept, sweeps_created
 
 
@@ -191,11 +207,17 @@ async def force_close_current_cycle(
             db.add(record)
             await db.flush()
 
+    # Strictly greater: a period that began on early_date itself has not run for
+    # a single day, and truncating it would set period_end == period_start,
+    # which ck_env_period_date_range rejects and turns the whole declaration
+    # into a 500. There is also nothing to close there - that period *is* the
+    # cycle starting on this date - so it is left alone and the sweep below
+    # handles it.
     active_periods_res = await db.execute(
         select(EnvelopePeriod)
         .where(
             EnvelopePeriod.user_id == user.id,
-            EnvelopePeriod.period_start <= early_date,
+            EnvelopePeriod.period_start < early_date,
             EnvelopePeriod.period_end > early_date,
         )
     )
@@ -205,7 +227,9 @@ async def force_close_current_cycle(
         db.add(period)
     await db.flush()
 
-    await run_sweep(db, user, early_date, force=True)
+    # No commit: this runs inside the transaction that is still recording the
+    # income, and the request goes on to use ORM objects a commit would expire.
+    await run_sweep(db, user, early_date, force=True, commit=False)
 
 
 async def preview_sweep(
@@ -299,7 +323,13 @@ async def run_due_sweeps(
 
     periods_swept_total = 0
     sweeps_created_total = 0
-    for due_end in due_period_ends:
+    for index, due_end in enumerate(due_period_ends):
+        if index:
+            # Every previous iteration ended in a commit or a rollback, and both
+            # expire the ORM instances in the session. Reading an expired
+            # attribute under async SQLAlchemy raises rather than reloading, so
+            # the user is reloaded explicitly before its fields are read again.
+            await db.refresh(locked_user)
         target_day = due_end - timedelta(days=1)
         period_start, _period_end = period_bounds(
             anchor, target_day, locked_user.sweep_interval_days
