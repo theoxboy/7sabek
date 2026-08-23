@@ -81,6 +81,21 @@ async def create_admin_notification(
     db.add(notification)
     await db.commit()
     await db.refresh(notification)
+
+    # Dispatch real-time FCM push notification
+    from app.services.fcm_service import send_fcm_broadcast
+    await send_fcm_broadcast(
+        title_fr=notification.title_fr,
+        title_ar=notification.title_ar,
+        message_fr=notification.message_fr,
+        message_ar=notification.message_ar,
+        action_type=notification.action_type,
+        action_url=notification.action_url,
+        haptic_effect=notification.haptic_effect,
+        priority=notification.priority,
+        notification_id=notification.id,
+    )
+
     return notification
 
 
