@@ -72,13 +72,6 @@ def create_app() -> FastAPI:
             except Exception as exc:
                 logging.getLogger("app.startup").warning("Alembic migrations on startup warning: %s", exc)
 
-            try:
-                async with get_engine().begin() as conn:
-                    await conn.run_sync(Base.metadata.create_all)
-                logging.getLogger("app.startup").info("SQLAlchemy tables synchronized successfully.")
-            except Exception as exc:
-                logging.getLogger("app.startup").warning("Database table sync warning: %s", exc)
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
