@@ -157,7 +157,7 @@ async def send_fcm_broadcast(
     haptic_effect: str = "Success",
     priority: str = "normal",
     notification_id: int = 0,
-    topic: Optional[str] = "all_users",
+    topic: Optional[str] = None,
     tokens: Optional[list[str]] = None,
 ) -> bool:
     """
@@ -166,12 +166,13 @@ async def send_fcm_broadcast(
     """
     sa = _get_service_account_dict()
     if not sa:
-        logger.info("No Firebase service account configured; skipping direct FCM socket push.")
+        logger.info("No Firebase service account configured; skipping direct FCM push.")
         return False
 
     project_id = sa.get("project_id", "com-floussy-app")
     token = await _get_fcm_access_token(sa)
     if not token:
+        logger.warning("Could not obtain FCM OAuth2 token.")
         return False
 
     url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
@@ -222,11 +223,11 @@ async def send_fcm_broadcast(
                         logger.info("FCM v1 sent to direct token [ID=%s]: %s", notification_id, d_token[:15])
                         sent_any = True
                     else:
-                        logger.warning("FCM token send error [%s]: %s", resp.status_code, resp.text)
+                        logger.warning("FCM token send response [%s]: %s", resp.status_code, resp.text)
                 except Exception as e:
                     logger.warning("FCM token request exception: %s", e)
 
-        # Also send to topic
+        # Send to topic if specified and no tokens or explicitly requested
         if topic:
             try:
                 payload = build_message_payload("topic", topic)

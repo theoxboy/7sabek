@@ -84,14 +84,21 @@ async def create_admin_notification(
 
     # Dispatch real-time FCM push notification directly to devices & topic (Fail-safe)
     device_tokens: list[str] = []
+    fcm_topic: Optional[str] = None
     try:
         token_stmt = select(DeviceToken.token)
         if payload.target_audience == "specific" and payload.target_user_email:
             token_stmt = token_stmt.where(DeviceToken.user_email == payload.target_user_email.strip().lower())
+            fcm_topic = None
         elif payload.target_audience == "lang_ar":
             token_stmt = token_stmt.where(DeviceToken.language.in_(["ar", "darija"]))
+            fcm_topic = None
         elif payload.target_audience == "lang_fr":
             token_stmt = token_stmt.where(DeviceToken.language == "fr")
+            fcm_topic = None
+        else:
+            # Broadcast to all users
+            fcm_topic = "all_users"
         
         token_res = await db.execute(token_stmt)
         device_tokens = list(token_res.scalars().all())
@@ -111,6 +118,7 @@ async def create_admin_notification(
             haptic_effect=notification.haptic_effect,
             priority=notification.priority,
             notification_id=notification.id,
+            topic=fcm_topic if (not device_tokens and fcm_topic) else None,
             tokens=device_tokens if device_tokens else None,
         )
     except Exception as exc:
@@ -288,21 +296,6 @@ async def register_device_token(
         raise HTTPException(status_code=400, detail="Empty device token")
 
     try:
-        from sqlalchemy import text
-        await db.execute(text("""
-            CREATE TABLE IF NOT EXISTS device_tokens (
-                id SERIAL PRIMARY KEY,
-                token VARCHAR(500) UNIQUE NOT NULL,
-                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-                user_email VARCHAR(255),
-                platform VARCHAR(50) DEFAULT 'android' NOT NULL,
-                language VARCHAR(10) DEFAULT 'fr' NOT NULL,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS ix_device_tokens_token ON device_tokens(token);
-        """))
-        await db.commit()
-
         res = await db.execute(select(DeviceToken).where(DeviceToken.token == token_str))
         existing = res.scalar_one_or_none()
 
@@ -312,6 +305,7 @@ async def register_device_token(
                 existing.user_email = current_user.email
             existing.platform = payload.platform
             existing.language = payload.language
+            existing.updated_at = func.now()
         else:
             new_token = DeviceToken(
                 token=token_str,
@@ -324,8 +318,10 @@ async def register_device_token(
 
         await db.commit()
     except Exception as exc:
+        await db.rollback()
         import logging
-        logging.getLogger("app.notifications").warning("Error registering device token: %s", exc)
+        logging.getLogger("app.notifications").error("Error registering device token: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to register device token")
 
     return {"ok": True}
 
