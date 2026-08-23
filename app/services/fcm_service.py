@@ -188,6 +188,23 @@ async def send_fcm_broadcast(
         return {
             "message": {
                 target_key: target_val,
+                "notification": {
+                    "title": display_title,
+                    "body": display_body,
+                },
+                "android": {
+                    "priority": "HIGH",
+                    "direct_boot_ok": True,
+                    "notification": {
+                        "channel_id": "channel_admin_broadcast_v2",
+                        "sound": "default",
+                        "default_sound": True,
+                        "default_vibrate_timings": True,
+                        "notification_priority": "PRIORITY_MAX",
+                        "visibility": "PUBLIC",
+                        "icon": "ic_launcher",
+                    },
+                },
                 "data": {
                     "id": str(notification_id),
                     "title": display_title,
@@ -201,10 +218,6 @@ async def send_fcm_broadcast(
                     "action_url": action_url or "",
                     "haptic_effect": haptic_effect or "Success",
                     "priority": priority or "normal",
-                },
-                "android": {
-                    "priority": "HIGH",
-                    "direct_boot_ok": True,
                 },
             }
         }
