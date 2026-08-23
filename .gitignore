@@ -5,6 +5,7 @@
 .env
 .env.*
 !.env.example
+*firebase*.json
 
 # Python
 __pycache__/
