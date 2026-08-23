@@ -16,14 +16,63 @@ _cached_access_token: Optional[str] = None
 _cached_token_expires_at: float = 0.0
 
 
+_FALLBACK_SA_B64 = (
+    "eyJ0eXBlIjogInNlcnZpY2VfYWNjb3VudCIsICJwcm9qZWN0X2lkIjogImNvbS1mbG91c3N5LWFwc"
+    "CIsICJwcmlyYXRlX2tleV9pZCI6ICJiODQxNWIyNzk4Y2EwYzEyMDM1M2FkMmQ5OGYxNjc2ZGQzNGM"
+    "1NTBiIiwgInByaXZhdGVfa2V5IjogIi0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLVxuTUlJRXZBS"
+    "UJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS1l3Z2dTaUFnRUFBb0lCQVFDOWZEd3lFYmpBNzdGUVxu"
+    "RzB5eFFYUUxVTzkwMStQWlRGNGhWUFRDUFFjQ1VLY2FUUkZwMGhaRXozdU1iMzhWY0xkZVNIODk5QjB"
+    "3cFpIMlxudWpnME1QcTFGMlNucmZ4d2JNSWdKUVkxSFRpTW0rZ2lBTVdmSGViVUQrQlI1TWlNUVRtN0"
+    "1vK2MxdTZNN3hQOFxuTmp3TGNJMHlFTndVUkhGZkJadHM4cW1aUGc1TURqaDJwc3pGZTB2UmJmTTcxN"
+    "1B4SWdQMG9IV0hKSXJaT0xRVlxuOE9FRm5MaWpXRTV3anBtQ29KTllQdld4RitLdWJQZGtXdE1QZWYr"
+    "U1ZoVmRNbkdjUVFwQmRNa0dwazEyK05YR1xud0IrT0lxbFJlQU54ck9QRXEvRkFZYThlM1p0Tnk1eVB"
+    "2Z0s3aTRpNEVLOTB0cHMxeUg0SDgyR2pZQWM4ZGNOdlxuTkpZNXRvQkpBZ01CQUFFQ2dmOEx2ZUZDMm"
+    "syTFRQSUJWanRld0l5cWcvQ3Z6TitMMGNic01wR3lZRnVPMU0yMFxubVZmTVdjK3FYS1Z1TVV3QUt3Z"
+    "U84d1pqM0E0aGpOc3ROS0s3VTJUdjZ4cDBqMThnM2lnU0c2MllQK1hZYzZKQVxuU3Axb3ZzTVBBK3pX"
+    "OTc4WWxNT1dWZ3UrdCsvNUVaSEN2Y2dwU21kMWVKWDhIK1NKZnRzWEgyYkFJOTRjQnRpc1xuVW96VFJ"
+    "XSnpWNDl1djc3QTJBVlVJM0d3YXAyWUUvY29hTDNXZVI2STQ5OHJmRGFjNVBLTmxqcDM0aTZEYUNEM1"
+    "xuR3N6QngyYXNhTzJZR0h2ZWh2MlJrSWFIUGg4YkxpMmNBZ2VoU2VSZExDTEVwMW84ZE5IM2hITjBqR"
+    "05xWHcvM1xuZEJpUUJuTWw4a0JwMXNYMW1aVm85TFNWYkJrZnlpdktMWTZOR0RrQ2dZRUE4NlhGUVFW"
+    "ajJ6TERFc0RyOFdWbVxubi9HUFpVdWV2MU44VXZxVGFLQVRvSzZMWDJweENjd0xCRWJId0pNTHljV0Vs"
+    "WW13ZURKMmpOTzY0ZFVZV3RnbVxuenZaYjdoNVRRbDg3cHhIK0pOVXBmZjdtYzVkbjlIb2NlUjJkNHFt"
+    "em85VGVjUVdrNk5mZ3h2d3BJelIyZ2cyb1xuNDBOZEkzaGY5S2lFaTMvM2tralVLcjBDZ1lFQXh4ZUNR"
+    "TDlQZUF2NU1HZENZYTc0L0FCL0YycUVpNGsycHFkS1xuamhYSTNwMWNBMVA2Q1Z6UzcwWjFtWFJEb0JO"
+    "OTdkSi9NMGtKczFSY3JmYzI1NmRRa3p4RmpHT2hVRWhxRzF2dVxucmEwN2tFbDFzUllscFlQdEwwb1A"
+    "4Wk0vaitUM0VCUjZZaithYTFCSlFYNmErZTk4elRpVVlYams3cDZOMUZ3SlxuTmNwL1NuMENnWUVBMWJ"
+    "WMWkwNjdBNjFHeGRCS0kvYVpTWG1NR1lGMndNTHRyYXIwV1RUdmdtVVhBcDVPZ0JWbFxuSkY4aEhwem"
+    "NIaU1ONUV4ZGFWQjZBNVJEdTRvNlRwU0JsYzhwVzNkbCtEV29FU2NMRUN1WXRWYzdzKy85MHNhNFxuNn"
+    "RNN2hYRHNqS3RPWVR4ZUpZNFZMdlJHOFFZM1hHTzIyNEJlMVpua01La1BlWHpKSHBxYTN0RUNnWUJKNU"
+    "l2UFxuaERIMm1Gc1FnQUsvUnJYYXNrUjVhR3R4YnFmK0NyRTlNeEN1cnpEcmUwdWVGZm1rSFQ2Z2llcG"
+    "ZpMXg5M0ZhaFxucmtZUGJReEk5U3hIcG0zZGQ4MUlZZUlKYmhjVHVIZEp0cllZdzJzUEl1MHVGVnorNU"
+    "RvdXF6dzRKLzhhMUw3blxub0R1c0FNeHZwcEhXbWZCMEtyL0h2WnNhaFhhV2p1Sk1PTEF0OFFLQmdRQ0"
+    "lacWxzNlpEYWpjWnlMTnAwYkNnNVxuSVZuYXNCd2Y5UCtWaTNteW9kbmtUU1hQMWhjWHU3WWtuSmViOTh"
+    "kSXo3Vk1LOFBOT0crbXpTWURsTktkeTRVb1xuZ3BLTFhueE4rOGFhb0ZYU1ZERXM3cE9TbGxQN0s3MC9"
+    "Kek4valpVWldtUGNXalN2N3hSSmFtTzZzcW1ZSlNtdVxuU0NRdlAxM3AwYysyS0NURDFicWdXdz09XG4"
+    "tLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tXG4iLCAiY2xpZW50X2VtYWlsIjogImZpcmViYXNlLWFkbWl"
+    "uc2RrLWZic3ZjQGNvbS1mbG91c3N5LWFwcC5pYW0uZ3NlcnZpY2VhY2NvdW50LmNvbSIsICJjbGllbn"
+    "RfaWQiOiAiMTAzNzMzOTQxOTkwNzUwNjI3ODU5IiwgImF1dGhfdXJpIjogImh0dHBzOi8vYWNjb3VudH"
+    "MuZ29vZ2xlLmNvbS9vL29hdXRoMi9hdXRoIiwgInRva2VuX3VyaSI6ICJodHRwczovL29hdXRoMi5nb2"
+    "9nbGVhcGlzLmNvbS90b2tlbiIsICJhdXRoX3Byb3ZpZGVyX3g1MDlfY2VydF91cmwiOiAiaHR0cHM6Ly"
+    "93d3cuZ29vZ2xlYXBpcy5jb20vb2F1dGgyL3YxL2NlcnRzIiwgImNsaWVudF94NTA5X2NlcnRfdXJsIj"
+    "ogImh0dHBzOi8vd3d3Lmdvb2dsZWFwaXMuY29tL3JvYm90L3YxL21ldGFkYXRhL3g1MDkvZmlyZWJhc2"
+    "UtYWRtaW5zZGstZmJzdmMlNDBjb20tZmxvdXNzeS1hcHAuaWFtLmdzZXJ2aWNlYWNjb3VudC5jb20iLC"
+    "AidW5pdmVyc2VfZG9tYWluIjogImdvb2dsZWFwaXMuY29tIn0="
+)
+
+
 def _get_service_account_dict() -> Optional[dict]:
-    # Check env var first
-    raw_env = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    import base64
+    # Check env var first (raw or b64)
+    raw_env = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("FIREBASE_SERVICE_ACCOUNT_B64")
     if raw_env:
         try:
             return json.loads(raw_env)
         except Exception:
-            pass
+            try:
+                decoded = base64.b64decode(raw_env).decode("utf-8")
+                return json.loads(decoded)
+            except Exception:
+                pass
 
     # Check local files
     candidates = [
@@ -38,6 +87,13 @@ def _get_service_account_dict() -> Optional[dict]:
                     return json.load(f)
             except Exception as exc:
                 logger.warning("Error reading firebase service account file %s: %s", path, exc)
+
+    # Use default built-in credentials
+    try:
+        decoded = base64.b64decode(_FALLBACK_SA_B64).decode("utf-8")
+        return json.loads(decoded)
+    except Exception as exc:
+        logger.warning("Error decoding default firebase credentials: %s", exc)
 
     return None
 
