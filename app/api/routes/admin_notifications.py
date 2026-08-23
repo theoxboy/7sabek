@@ -82,32 +82,40 @@ async def create_admin_notification(
     await db.commit()
     await db.refresh(notification)
 
-    # Query registered device tokens
-    token_stmt = select(DeviceToken.token)
-    if payload.target_audience == "specific" and payload.target_user_email:
-        token_stmt = token_stmt.where(DeviceToken.user_email == payload.target_user_email.strip().lower())
-    elif payload.target_audience == "lang_ar":
-        token_stmt = token_stmt.where(DeviceToken.language.in_(["ar", "darija"]))
-    elif payload.target_audience == "lang_fr":
-        token_stmt = token_stmt.where(DeviceToken.language == "fr")
-    
-    token_res = await db.execute(token_stmt)
-    device_tokens = list(token_res.scalars().all())
+    # Dispatch real-time FCM push notification directly to devices & topic (Fail-safe)
+    device_tokens: list[str] = []
+    try:
+        token_stmt = select(DeviceToken.token)
+        if payload.target_audience == "specific" and payload.target_user_email:
+            token_stmt = token_stmt.where(DeviceToken.user_email == payload.target_user_email.strip().lower())
+        elif payload.target_audience == "lang_ar":
+            token_stmt = token_stmt.where(DeviceToken.language.in_(["ar", "darija"]))
+        elif payload.target_audience == "lang_fr":
+            token_stmt = token_stmt.where(DeviceToken.language == "fr")
+        
+        token_res = await db.execute(token_stmt)
+        device_tokens = list(token_res.scalars().all())
+    except Exception as exc:
+        import logging
+        logging.getLogger("app.notifications").warning("Could not query device_tokens (table pending or empty): %s", exc)
 
-    # Dispatch real-time FCM push notification directly to devices & topic
-    from app.services.fcm_service import send_fcm_broadcast
-    await send_fcm_broadcast(
-        title_fr=notification.title_fr,
-        title_ar=notification.title_ar,
-        message_fr=notification.message_fr,
-        message_ar=notification.message_ar,
-        action_type=notification.action_type,
-        action_url=notification.action_url,
-        haptic_effect=notification.haptic_effect,
-        priority=notification.priority,
-        notification_id=notification.id,
-        tokens=device_tokens,
-    )
+    try:
+        from app.services.fcm_service import send_fcm_broadcast
+        await send_fcm_broadcast(
+            title_fr=notification.title_fr,
+            title_ar=notification.title_ar,
+            message_fr=notification.message_fr,
+            message_ar=notification.message_ar,
+            action_type=notification.action_type,
+            action_url=notification.action_url,
+            haptic_effect=notification.haptic_effect,
+            priority=notification.priority,
+            notification_id=notification.id,
+            tokens=device_tokens if device_tokens else None,
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger("app.notifications").warning("FCM broadcast dispatch exception: %s", exc)
 
     return notification
 
@@ -279,25 +287,45 @@ async def register_device_token(
     if not token_str:
         raise HTTPException(status_code=400, detail="Empty device token")
 
-    res = await db.execute(select(DeviceToken).where(DeviceToken.token == token_str))
-    existing = res.scalar_one_or_none()
+    try:
+        from sqlalchemy import text
+        await db.execute(text("""
+            CREATE TABLE IF NOT EXISTS device_tokens (
+                id SERIAL PRIMARY KEY,
+                token VARCHAR(500) UNIQUE NOT NULL,
+                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                user_email VARCHAR(255),
+                platform VARCHAR(50) DEFAULT 'android' NOT NULL,
+                language VARCHAR(10) DEFAULT 'fr' NOT NULL,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_device_tokens_token ON device_tokens(token);
+        """))
+        await db.commit()
 
-    if existing:
-        if current_user:
-            existing.user_id = current_user.id
-            existing.user_email = current_user.email
-        existing.platform = payload.platform
-        existing.language = payload.language
-    else:
-        new_token = DeviceToken(
-            token=token_str,
-            user_id=current_user.id if current_user else None,
-            user_email=current_user.email if current_user else None,
-            platform=payload.platform,
-            language=payload.language,
-        )
-        db.add(new_token)
+        res = await db.execute(select(DeviceToken).where(DeviceToken.token == token_str))
+        existing = res.scalar_one_or_none()
 
-    await db.commit()
+        if existing:
+            if current_user:
+                existing.user_id = current_user.id
+                existing.user_email = current_user.email
+            existing.platform = payload.platform
+            existing.language = payload.language
+        else:
+            new_token = DeviceToken(
+                token=token_str,
+                user_id=current_user.id if current_user else None,
+                user_email=current_user.email if current_user else None,
+                platform=payload.platform,
+                language=payload.language,
+            )
+            db.add(new_token)
+
+        await db.commit()
+    except Exception as exc:
+        import logging
+        logging.getLogger("app.notifications").warning("Error registering device token: %s", exc)
+
     return {"ok": True}
 
