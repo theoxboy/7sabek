@@ -224,7 +224,7 @@ async def send_fcm_broadcast(
 
     sent_any = False
     async with httpx.AsyncClient(timeout=10.0) as client:
-        # Send to topic if specified (instant broadcast to all devices)
+        # 1. Send to topic if specified (instant broadcast to all subscribed devices)
         if topic:
             try:
                 payload = build_message_payload("topic", topic)
@@ -237,8 +237,8 @@ async def send_fcm_broadcast(
             except Exception as e:
                 logger.warning("FCM topic request exception: %s", e)
 
-        # Send to direct device tokens for targeted audiences
-        if tokens and not topic:
+        # 2. ALSO send to direct device tokens if present (guarantees delivery to specific or targeted devices)
+        if tokens:
             for d_token in tokens:
                 if not d_token:
                     continue

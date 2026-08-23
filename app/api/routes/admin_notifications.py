@@ -92,10 +92,10 @@ async def create_admin_notification(
             fcm_topic = None
         elif payload.target_audience == "lang_ar":
             token_stmt = token_stmt.where(DeviceToken.language.in_(["ar", "darija"]))
-            fcm_topic = None
+            fcm_topic = "lang_ar"
         elif payload.target_audience == "lang_fr":
             token_stmt = token_stmt.where(DeviceToken.language == "fr")
-            fcm_topic = None
+            fcm_topic = "lang_fr"
         else:
             # Broadcast to all users
             fcm_topic = "all_users"
@@ -119,7 +119,7 @@ async def create_admin_notification(
             priority=notification.priority,
             notification_id=notification.id,
             topic=fcm_topic,
-            tokens=device_tokens if (device_tokens and not fcm_topic) else None,
+            tokens=device_tokens if device_tokens else None,
         )
     except Exception as exc:
         import logging
