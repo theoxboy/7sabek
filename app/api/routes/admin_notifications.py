@@ -346,9 +346,9 @@ async def test_fcm_dispatch():
     sa = _get_service_account_dict()
     if not sa:
         return {"ok": False, "error": "No valid service account found"}
-    token = await _get_fcm_access_token(sa)
+    token, err = await _get_fcm_access_token(sa)
     if not token:
-        return {"ok": False, "error": "Could not obtain OAuth2 token from Google"}
+        return {"ok": False, "error": err or "Could not obtain OAuth2 token from Google"}
 
     sent = await send_fcm_broadcast(
         title_fr="Test Production Live",

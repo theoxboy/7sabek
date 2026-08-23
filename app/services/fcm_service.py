@@ -117,19 +117,22 @@ def _get_service_account_dict() -> Optional[dict]:
     return None
 
 
-async def _get_fcm_access_token(sa: dict) -> Optional[str]:
+async def _get_fcm_access_token(sa: dict) -> tuple[Optional[str], Optional[str]]:
     global _cached_access_token, _cached_token_expires_at
     now = time.time()
     if _cached_access_token and now < _cached_token_expires_at - 60:
-        return _cached_access_token
+        return _cached_access_token, None
 
     client_email = sa.get("client_email")
     private_key = sa.get("private_key")
     token_uri = sa.get("token_uri", "https://oauth2.googleapis.com/token")
 
     if not client_email or not private_key:
-        logger.warning("Invalid Firebase service account: missing client_email or private_key")
-        return None
+        return None, "Invalid Firebase service account: missing client_email or private_key"
+
+    # Normalize private_key if newlines were escaped
+    if "\\n" in private_key and "\n" not in private_key:
+        private_key = private_key.replace("\\n", "\n")
 
     payload = {
         "iss": client_email,
@@ -143,20 +146,28 @@ async def _get_fcm_access_token(sa: dict) -> Optional[str]:
     try:
         signed_jwt = jwt.encode(payload, private_key, algorithm="RS256")
     except Exception as exc:
-        logger.warning("Error signing Google OAuth JWT: %s", exc)
-        return None
+        return None, f"Error signing Google OAuth JWT: {exc}"
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(
-            token_uri,
-            data={
-                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                "assertion": signed_jwt,
-            },
-        )
-        if resp.status_code != 200:
-            logger.warning("Failed to obtain Google OAuth token for FCM: %s %s", resp.status_code, resp.text)
-            return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                token_uri,
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                    "assertion": signed_jwt,
+                },
+            )
+            if resp.status_code != 200:
+                return None, f"Google OAuth2 token endpoint returned [{resp.status_code}]: {resp.text}"
+
+            token_data = resp.json()
+            access_token = token_data.get("access_token")
+            expires_in = token_data.get("expires_in", 3600)
+            _cached_access_token = access_token
+            _cached_token_expires_at = now + float(expires_in)
+            return access_token, None
+    except Exception as exc:
+        return None, f"HTTP exception requesting Google OAuth token: {exc}"
 
         token_data = resp.json()
         access_token = token_data.get("access_token")
@@ -189,9 +200,9 @@ async def send_fcm_broadcast(
         return False
 
     project_id = sa.get("project_id", "com-floussy-app")
-    token = await _get_fcm_access_token(sa)
+    token, err = await _get_fcm_access_token(sa)
     if not token:
-        logger.warning("Could not obtain FCM OAuth2 token.")
+        logger.warning("Could not obtain FCM OAuth2 token: %s", err)
         return False
 
     url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
