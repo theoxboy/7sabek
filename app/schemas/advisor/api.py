@@ -81,6 +81,14 @@ class AdvisorChatResponseOut(AdvisorApiBaseModel):
     text: str
 
 
+class AdvisorChatMessageOut(AdvisorApiBaseModel):
+    """A stored turn of the conversation, as every client replays it."""
+
+    role: str
+    text: str
+    created_at: datetime
+
+
 # Backward-compatible aliases used by current service/router wiring.
 AdvisorPreviewRequestIn = PostAdvisorPreviewRequest
 AdvisorPreviewEnvelopeOut = PostAdvisorPreviewResponse

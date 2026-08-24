@@ -22,6 +22,17 @@ class AIGatewayUnsupportedProviderError(ValueError):
     pass
 
 
+class AIGatewayQuotaError(ValueError):
+    """The provider refused for billing or rate reasons (402 / 429).
+
+    Distinguished from a genuine failure because nothing is wrong with the
+    request: the account is out of credit or is being throttled, and the user
+    needs a plain sentence, not a stack of provider internals.
+    """
+
+    pass
+
+
 def _safe_string(value: Any) -> str:
     return str(value or "").strip()
 
@@ -402,6 +413,9 @@ async def _chat_completion_gemini(
     # Build the request payload
     payload: dict[str, Any] = {
         "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": _resolve_max_output_tokens(settings),
+        },
     }
 
     if system_prompt:
@@ -542,6 +556,7 @@ async def _chat_completion_openai(
     payload: dict[str, Any] = {
         "model": model,
         "messages": openai_messages,
+        "max_tokens": _resolve_max_output_tokens(settings),
     }
 
     timeout_s = _resolve_timeout(settings)
@@ -557,6 +572,11 @@ async def _chat_completion_openai(
             body_preview = exc.response.text[:500]
         except Exception:
             pass
+        if exc.response.status_code in (402, 429):
+            raise AIGatewayQuotaError(
+                f"AI provider returned {exc.response.status_code}: "
+                f"{body_preview or str(exc)}"
+            ) from exc
         raise ValueError(
             f"AI provider returned {exc.response.status_code}: "
             f"{body_preview or str(exc)}"
@@ -582,6 +602,24 @@ async def _chat_completion_openai(
         raise ValueError("AI provider returned an empty response.")
 
     return content
+
+
+def _resolve_max_output_tokens(settings: Any) -> int:
+    """How many tokens the answer may use.
+
+    Sending no limit at all is what caused "402: you requested up to 16384
+    tokens, but can only afford 16126": providers reserve the model's whole
+    completion budget against the account balance before generating a word. An
+    advisor reply is a few paragraphs, so reserving sixteen thousand tokens
+    priced every request as if it were a novel.
+    """
+    default = 1500
+    ai_routing = settings.ai_routing if isinstance(settings.ai_routing, dict) else {}
+    try:
+        value = int(ai_routing.get("max_output_tokens") or default)
+    except Exception:
+        value = default
+    return max(256, min(value, 8192))
 
 
 def _resolve_timeout(settings: Any) -> float:

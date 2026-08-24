@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.rate_limit import check_rate_limit
 from app.db.session import get_db
+from app.models.advisor_chat_message import AdvisorChatMessage
 from app.models.user import User
 from app.models.envelope import Envelope
 from app.models.envelope_period import EnvelopePeriod
@@ -21,6 +29,7 @@ from app.repositories.advisor import (
 from app.schemas.advisor.api import (
     AdvisorAcceptOut,
     AdvisorAcceptRequestIn,
+    AdvisorChatMessageOut,
     AdvisorChatRequestIn,
     AdvisorChatResponseOut,
     AdvisorPreviewEnvelopeOut,
@@ -39,9 +48,12 @@ from app.services.advisor import (
 )
 from app.services.ai_gateway_client import (
     AIGatewayConfigurationError,
+    AIGatewayQuotaError,
     _safe_string,
     chat_completion_via_gateway,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/advisor")
 
@@ -261,6 +273,133 @@ async def _collect_user_context(db: AsyncSession, user: User) -> dict:
     }
 
 
+ADVISOR_QUOTA_WINDOW_HOURS = 24
+
+# The market's timezone: a user in Casablanca must read the hour they will
+# actually see on their phone, not UTC.
+ADVISOR_DISPLAY_TIMEZONE = "Africa/Casablanca"
+
+_MONTHS_FR = [
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+]
+_MONTHS_EN = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+_MONTHS_AR = [
+    "يناير", "فبراير", "مارس", "أبريل", "ماي", "يونيو",
+    "يوليوز", "غشت", "شتنبر", "أكتوبر", "نونبر", "دجنبر",
+]
+
+
+def _advisor_retry_after_seconds(error: Exception) -> Optional[int]:
+    """Seconds the provider asked us to wait, when it says so.
+
+    A rate limit usually carries its own window; only when it does not do we
+    fall back to a flat 24 hours.
+    """
+    text = str(error)
+    for pattern in (
+        r'"retry[_-]?after"\s*:\s*"?(\d+)',
+        r"retry[- ]after[\"'\s:]+(\d+)",
+    ):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            try:
+                seconds = int(match.group(1))
+            except ValueError:
+                continue
+            # Anything beyond a week is not a wait, it is an outage.
+            if 0 < seconds <= 7 * 24 * 3600:
+                return seconds
+    return None
+
+
+def _advisor_quota_reset_at(seconds_until_reset: Optional[int]) -> datetime:
+    """When the user should come back.
+
+    The delay is anchored on the first refusal rather than recomputed on every
+    attempt: "come back in 24 hours" that moves forward each time the user taps
+    send is not a limit, it is a mirage.
+    """
+    delay = timedelta(seconds=seconds_until_reset) if seconds_until_reset and seconds_until_reset > 0 \
+        else timedelta(hours=ADVISOR_QUOTA_WINDOW_HOURS)
+    return datetime.now(timezone.utc) + delay
+
+
+def _format_reset_moment(moment: datetime, language: str) -> str:
+    """A date a human reads, without depending on server locales."""
+    try:
+        local = moment.astimezone(ZoneInfo(ADVISOR_DISPLAY_TIMEZONE))
+    except Exception:
+        # No tz database on the host: Morocco is UTC+1 year round.
+        local = moment.astimezone(timezone(timedelta(hours=1)))
+
+    day = local.day
+    month_index = local.month - 1
+    hour = local.strftime("%H:%M")
+
+    if language == "ar":
+        return f"{day} {_MONTHS_AR[month_index]} {local.year} على {hour}"
+    if language == "en":
+        return f"{_MONTHS_EN[month_index]} {day}, {local.year} at {hour}"
+    return f"{day} {_MONTHS_FR[month_index]} {local.year} à {hour}"
+
+
+def _advisor_outage_notice(
+    prompt: str,
+    error: Exception,
+    seconds_until_reset: Optional[int] = None,
+) -> str:
+    """One sentence telling the user what happened, in the language they used."""
+    prompt_lower = (prompt or "").lower()
+    is_darija = any(
+        w in prompt_lower
+        for w in ["chkoun", "fin", "flous", "kifach", "3afak", "bghit", "dyal", "salam", "chokran"]
+    ) or any("\u0600" <= ch <= "\u06ff" for ch in (prompt or ""))
+    is_english = any(
+        w in prompt_lower
+        for w in ["hello", "how", "what", "budget", "save", "money", "help", "security"]
+    )
+
+    if isinstance(error, AIGatewayQuotaError):
+        # Same shape as any assistant that meters usage: say the limit was
+        # reached, and say exactly when it lifts. Never why, and never with the
+        # provider's billing page attached.
+        reset_at = _advisor_quota_reset_at(seconds_until_reset)
+        if is_darija:
+            moment = _format_reset_moment(reset_at, "ar")
+            return (
+                f"⏳ وصلتي للحد ديال المحادثة مع المساعد الذكي دابا.\n"
+                f"عاود جرب من بعد **{moment}**. حتى ذاك الوقت، ها تحليل مباشر ديال أرقامك :"
+            )
+        if is_english:
+            moment = _format_reset_moment(reset_at, "en")
+            return (
+                f"⏳ You have reached the AI chat limit for now.\n"
+                f"Please come back after **{moment}**. In the meantime, here is a read of your figures:"
+            )
+        moment = _format_reset_moment(reset_at, "fr")
+        return (
+            f"⏳ Vous avez atteint la limite du chat avec l'assistant IA.\n"
+            f"Revenez après **{moment}**. En attendant, voici une lecture de vos chiffres :"
+        )
+
+    if isinstance(error, AIGatewayConfigurationError):
+        if is_darija:
+            return "⚙️ المساعد الذكي مامفعلش حالياً. ها تحليل مباشر ديال حسابك :"
+        if is_english:
+            return "⚙️ The AI assistant is not switched on yet. Here is a direct read of your account:"
+        return "⚙️ L'assistant IA n'est pas encore activé. Voici une lecture directe de votre compte :"
+
+    if is_darija:
+        return "⚠️ ما قدرناش نوصلو للمساعد الذكي. ها تحليل ديال أرقامك :"
+    if is_english:
+        return "⚠️ The AI assistant could not be reached. Here is a read of your figures:"
+    return "⚠️ Impossible de joindre l'assistant IA. Voici une lecture de vos chiffres :"
+
+
 def _generate_advisor_fallback_response(user_context: dict, prompt: str) -> str:
     """Generate a high-quality contextual advisory response when external LLM is unreachable."""
     profile = user_context.get("profile", {})
@@ -474,9 +613,86 @@ async def advisor_chat(
             system_prompt=system_prompt,
         )
     except Exception as exc:
-        err_msg = str(exc)
-        # Display clear diagnostic if gateway fails so superadmin knows immediately why
+        # The raw provider error used to be printed straight into the chat
+        # bubble - billing URLs, token accounting, internal messages and all.
+        # Users get a sentence they can act on; the details go to the log, and
+        # to superadmins, who are the only ones who can do anything with them.
+        logger.warning("Advisor gateway failed: %s", exc, exc_info=True)
+
+        seconds_until_reset: Optional[int] = None
+        if isinstance(exc, AIGatewayQuotaError):
+            seconds_until_reset = _advisor_retry_after_seconds(exc)
+            if not seconds_until_reset:
+                # A one-slot bucket per user: the first refusal opens the
+                # window, every later attempt reads the same end time.
+                quota_window = await check_rate_limit(
+                    db,
+                    key=f"advisor-quota:{current_user.id}",
+                    limit=1,
+                    window_seconds=ADVISOR_QUOTA_WINDOW_HOURS * 3600,
+                )
+                seconds_until_reset = quota_window.retry_after
+
+        notice = _advisor_outage_notice(last_user_prompt, exc, seconds_until_reset)
         fallback_text = _generate_advisor_fallback_response(user_context, last_user_prompt)
-        reply = f"⚠️ **[Diagnostic IA]** : `{err_msg}`\n\n---\n\n{fallback_text}"
+        reply = f"{notice}\n\n---\n\n{fallback_text}"
+        if current_user.role == "superadmin":
+            reply = f"{reply}\n\n`[diagnostic superadmin] {str(exc)[:400]}`"
+
+    # Store the exchange so every client of this account continues the same
+    # conversation. Only the trailing user message is written: clients still
+    # send their whole transcript, and persisting all of it would duplicate the
+    # history on every turn.
+    try:
+        if last_user_prompt:
+            db.add(
+                AdvisorChatMessage(
+                    user_id=current_user.id,
+                    role="user",
+                    text=last_user_prompt,
+                )
+            )
+        db.add(
+            AdvisorChatMessage(
+                user_id=current_user.id,
+                role="assistant",
+                text=reply,
+            )
+        )
+        await db.commit()
+    except Exception:
+        # A history that cannot be written must not cost the user the answer
+        # they just waited for.
+        await db.rollback()
 
     return AdvisorChatResponseOut(text=reply)
+
+
+@router.get("/chat/history", response_model=list[AdvisorChatMessageOut])
+async def advisor_chat_history(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[AdvisorChatMessageOut]:
+    """The account's conversation, oldest first, shared by web and mobile."""
+    result = await db.execute(
+        select(AdvisorChatMessage)
+        .where(AdvisorChatMessage.user_id == current_user.id)
+        .order_by(AdvisorChatMessage.seq.desc())
+        .limit(limit)
+    )
+    messages = list(result.scalars().all())
+    messages.reverse()
+    return [AdvisorChatMessageOut.model_validate(m, from_attributes=True) for m in messages]
+
+
+@router.delete("/chat/history", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_advisor_chat_history(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """Clears the conversation for this account, on every device at once."""
+    await db.execute(
+        delete(AdvisorChatMessage).where(AdvisorChatMessage.user_id == current_user.id)
+    )
+    await db.commit()

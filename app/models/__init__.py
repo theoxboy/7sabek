@@ -37,6 +37,7 @@ from app.models.web_login_token import WebLoginToken
 from app.models.webauthn_challenge import WebAuthnChallenge
 from app.models.advisor_preview import AdvisorPreview
 from app.models.advisor_pre_apply_validation import AdvisorPreApplyValidation
+from app.models.advisor_chat_message import AdvisorChatMessage
 from app.models.advisor_decision import AdvisorDecision
 from app.models.email_design_settings import EmailDesignSettings
 from app.models.email_delivery import EmailDelivery
@@ -92,6 +93,7 @@ __all__ = [
     "AdvisorPreview",
     "AdvisorPreApplyValidation",
     "AdvisorDecision",
+    "AdvisorChatMessage",
     "EmailDesignSettings",
     "EmailDelivery",
     "EmailCampaign",
