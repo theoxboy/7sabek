@@ -113,6 +113,97 @@ def test_apply_materializes_expense_envelopes_missing_from_e11_selection(databas
     asyncio.run(_run())
 
 
+def test_apply_funds_transport_leaf_envelopes_not_a_domain_aggregate(
+    database_url: str,
+) -> None:
+    """Reproduces the /envelopes bug: a car user with fuel/insurance/maintenance/
+    tax and E11 leaf envelopes must NOT end up with a stray "Transport" envelope
+    holding all the money while the leaves stay at zero."""
+    answers = build_answers(include_explicit_envelope_answers=True, modernize=True)
+    answers["E4_transport_mode"] = "car"
+    answers.pop("TRP1_public_monthly_amount", None)
+    answers["TR1_car_fuel_amount"] = "900"
+    answers["TR1_car_maintenance_amount"] = "300"
+    answers["TR1_car_insurance_amount"] = "400"
+    answers["TR1_car_insurance_cycle"] = "monthly"
+    answers["TR1_car_tax_annual_amount"] = "1200"
+    answers["E6_support_family"] = "yes"
+    answers["E6a_support_family_amount"] = "500"
+    answers["E6b_support_family_cadence"] = "monthly"
+    answers["E11_selected_envelopes_v1"] = [
+        *[
+            e
+            for e in answers["E11_selected_envelopes_v1"]
+            if e["name"] != "Transport"
+        ],
+        *[
+            {
+                "name": leaf,
+                "final_name": leaf,
+                "group_key": "transport",
+                "final_rollover_enabled": True,
+                "custom_category": None,
+                "custom_amount": None,
+            }
+            for leaf in ("Carburant", "Assurance auto", "Entretien auto", "Taxe auto")
+        ],
+        {
+            "name": "Famille — Aide",
+            "final_name": "Famille — Aide",
+            "group_key": "family",
+            "final_rollover_enabled": True,
+            "custom_category": None,
+            "custom_amount": None,
+        },
+    ]
+
+    async def _run() -> None:
+        sessionmaker = await _build_sessionmaker(database_url)
+        async with sessionmaker() as db:
+            user = await _create_user_with_defaults(db, "apply-transport-leaves@example.com")
+            await apply_onboarding_v2_payload(db, user, answers=answers, draft_objects={})
+            await db.flush()
+
+            from app.models import DistributionRule
+            from app.services.distribution_name_normalization import (
+                distribution_name_equivalent_key,
+            )
+
+            env_res = await db.execute(select(Envelope).where(Envelope.user_id == user.id))
+            envs = list(env_res.scalars().all())
+            by_lower = {e.name.strip().lower(): e for e in envs}
+
+            # No "Transport" domain aggregate materialized.
+            assert not any(
+                distribution_name_equivalent_key(e.name) == "transport" for e in envs
+            ), [e.name for e in envs]
+
+            # One family envelope, not two.
+            family = [
+                e for e in envs if distribution_name_equivalent_key(e.name) == "family_aid"
+            ]
+            assert len(family) == 1, [e.name for e in family]
+
+            rule_res = await db.execute(
+                select(DistributionRule).where(DistributionRule.user_id == user.id)
+            )
+            rules_by_env = {r.target_id: r for r in rule_res.scalars().all()}
+
+            # Each transport leaf carries its own fixed rule with a positive amount.
+            for leaf in ("carburant", "assurance auto", "entretien auto", "taxe auto"):
+                env = by_lower.get(leaf)
+                assert env is not None, f"leaf envelope {leaf!r} not created: {list(by_lower)}"
+                rule = rules_by_env.get(env.id)
+                assert rule is not None, f"no rule for {leaf}"
+                assert rule.mode == "fixed_per_period"
+                assert float(rule.amount or 0) > 0, f"{leaf} rule amount = {rule.amount}"
+
+            # And the family fixed rule attached to the single family envelope.
+            assert rules_by_env.get(family[0].id) is not None
+
+    asyncio.run(_run())
+
+
 def test_apply_does_not_duplicate_family_aid_envelope_across_name_variants(
     database_url: str,
 ) -> None:
