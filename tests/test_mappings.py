@@ -37,7 +37,15 @@ def test_get_mappings_empty(client: TestClient) -> None:
 def test_put_get_delete_mapping(client: TestClient) -> None:
     user = create_user(client, "mapcrud@example.com")
     category = create_category(client, user["id"], "debt_custom")
-    envelope = create_envelope(client, user["id"], "dettes_custom")
+    # A debt-looking envelope must roll over (the debt profile forbids
+    # rollover_enabled=False); the debt_* category then scores 95 against it so
+    # the mapping survives the reconcile pass in GET /mappings.
+    env_response = client.post(
+        "/envelopes",
+        json={"name": "dettes_custom", "rollover_enabled": True},
+    )
+    assert env_response.status_code == 201, env_response.text
+    envelope = env_response.json()
 
     put_response = client.put(
         f"/categories/{category['id']}/envelope",
