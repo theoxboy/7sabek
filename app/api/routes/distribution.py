@@ -19,6 +19,7 @@ from app.db.session import get_db
 from app.models import (
     Category,
     DistributionItem,
+    DistributionLog,
     DistributionSavedConfig,
     DistributionRule,
     Envelope,
@@ -649,6 +650,47 @@ async def _cash_balance_for_period(
         return Decimal("0.00")
     balance = await compute_period_balance(db, period.id)
     return balance["closing_balance"]
+
+
+def _distribution_run_warnings(
+    rules: list[DistributionRule],
+    *,
+    ceiling: Decimal,
+    apply_income_filter: bool,
+) -> list[str]:
+    """Advisory warnings for a simulate/apply run.
+
+    Shared by /simulate and /apply so the preview and the real run cannot drift
+    apart. ``ceiling`` is the amount that actually limits the distribution
+    (min(cash, base) for /apply, the hypothetical base for /simulate).
+    """
+    warnings: list[str] = []
+    fixed_requested = sum(
+        (
+            Decimal(str(rule.amount or 0))
+            for rule in rules
+            if rule.enabled
+            and rule.mode in {"fixed", "fixed_per_period"}
+            and (not apply_income_filter or rule.auto_apply_on_income)
+        ),
+        Decimal("0.00"),
+    )
+    if fixed_requested > 0 and ceiling < fixed_requested:
+        warnings.append("Cash insuffisant: fixes partiellement appliqués.")
+
+    percent_total = sum(
+        (
+            Decimal(str(rule.percent or 0))
+            for rule in rules
+            if rule.enabled
+            and rule.mode in {"percent", "percent_of_income"}
+            and (not apply_income_filter or rule.auto_apply_on_income)
+        ),
+        Decimal("0.00"),
+    )
+    if percent_total > Decimal("100.00"):
+        warnings.append("Total % > 100, normalisé automatiquement.")
+    return warnings
 
 
 @router.get("/rules", response_model=List[DistributionRuleOut])
@@ -1996,31 +2038,9 @@ async def simulate_distribution(
     )
     remaining_after_fixed = cash_before - fixed_total
     remaining_after_percent = cash_before - total
-    warnings: list[str] = []
-
-    fixed_requested = sum(
-        (
-            Decimal(str(rule.amount or 0))
-            for rule in rules
-            if rule.enabled and rule.mode in {"fixed", "fixed_per_period"}
-            and (not apply_income_filter or rule.auto_apply_on_income)
-        ),
-        Decimal("0.00"),
+    warnings = _distribution_run_warnings(
+        rules, ceiling=cash_before, apply_income_filter=apply_income_filter
     )
-    if cash_before < fixed_requested and fixed_requested > 0:
-        warnings.append("Cash insuffisant: fixes partiellement appliqués.")
-
-    percent_total = sum(
-        (
-            Decimal(str(rule.percent or 0))
-            for rule in rules
-            if rule.enabled and rule.mode in {"percent", "percent_of_income"}
-            and (not apply_income_filter or rule.auto_apply_on_income)
-        ),
-        Decimal("0.00"),
-    )
-    if percent_total > Decimal("100.00"):
-        warnings.append("Total % > 100, normalisé automatiquement.")
 
     eligible_rules = [
         rule
@@ -2091,14 +2111,56 @@ async def simulate_distribution(
     )
 
 
+async def _income_auto_log_for_txn(
+    db: AsyncSession, user_id: UUID, transaction_id: UUID
+) -> Optional[DistributionLog]:
+    result = await db.execute(
+        select(DistributionLog).where(
+            DistributionLog.user_id == user_id,
+            DistributionLog.trigger == "income_auto",
+            DistributionLog.transaction_id == transaction_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+def _apply_out(log: DistributionLog, *, warnings: list[str], already_applied: bool) -> DistributionApplyOut:
+    return DistributionApplyOut(
+        run_id=log.id,
+        cash_before=log.cash_before,
+        cash_after=log.cash_after,
+        total_distributed=Decimal(str(log.cash_before)) - Decimal(str(log.cash_after)),
+        warnings=warnings,
+        already_applied=already_applied,
+    )
+
+
 @router.post("/apply", response_model=DistributionApplyOut)
 async def apply_distribution(
     payload: DistributionApplyRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DistributionApplyOut:
+    txn: Optional[Transaction] = None
+    if payload.transaction_id is not None:
+        txn_result = await db.execute(
+            select(Transaction).where(
+                Transaction.id == payload.transaction_id,
+                Transaction.user_id == current_user.id,
+            )
+        )
+        txn = txn_result.scalar_one_or_none()
+        if txn is None or txn.type != TransactionType.INCOME:
+            raise HTTPException(status_code=404, detail="income transaction not found")
+
+        # Idempotency: this transaction may already have been distributed by the
+        # backend auto-apply on create, or by an earlier retry of this call.
+        existing = await _income_auto_log_for_txn(db, current_user.id, txn.id)
+        if existing is not None:
+            return _apply_out(existing, warnings=[], already_applied=True)
+
     as_of, period_start, period_end = await _current_period_bounds(
-        db, current_user, payload.occurred_on
+        db, current_user, payload.occurred_on or (txn.occurred_on if txn is not None else None)
     )
 
     rules = await get_effective_distribution_rules(db, current_user)
@@ -2106,15 +2168,18 @@ async def apply_distribution(
     cash_available = await _cash_balance_for_period(
         db, current_user, period_start, period_end
     )
-    if payload.income_amount is None and not payload.use_cash_available:
+
+    income_amount = (
+        txn.amount
+        if txn is not None
+        else (Decimal(str(payload.income_amount)) if payload.income_amount is not None else None)
+    )
+    if income_amount is None and not payload.use_cash_available:
         raise HTTPException(status_code=400, detail="income_amount or use_cash_available required")
 
-    base_amount = (
-        Decimal(str(payload.income_amount))
-        if payload.income_amount is not None
-        else cash_available
-    )
-    apply_income_filter = payload.income_amount is not None and not payload.use_cash_available
+    tied_to_income = income_amount is not None and not payload.use_cash_available
+    base_amount = income_amount if tied_to_income else cash_available
+    apply_income_filter = tied_to_income
 
     plan = await build_distribution_plan(
         db=db,
@@ -2127,27 +2192,40 @@ async def apply_distribution(
         base_amount=base_amount,
         apply_income_filter=apply_income_filter,
     )
+    # Same advisory warnings the preview computes, but against what actually
+    # capped this run (min of real cash and the declared income) so a run that
+    # under-distributed does not come back looking clean.
+    warnings = _distribution_run_warnings(
+        rules,
+        ceiling=min(cash_available, base_amount),
+        apply_income_filter=apply_income_filter,
+    )
     active_cfg = await _active_saved_config_for_date(db, current_user, period_start)
 
-    log = await apply_distribution_plan(
-        db=db,
-        user=current_user,
-        ctx=DistributionContext(
-            occurred_on=as_of, period_start=period_start, period_end=period_end
-        ),
-        plan=plan,
-        trigger="manual_apply",
-        transaction_id=None,
-        income_amount=payload.income_amount,
-        config_id=active_cfg.id if active_cfg is not None else None,
-        config_version=active_cfg.version if active_cfg is not None else None,
-    )
+    try:
+        log = await apply_distribution_plan(
+            db=db,
+            user=current_user,
+            ctx=DistributionContext(
+                occurred_on=as_of, period_start=period_start, period_end=period_end
+            ),
+            plan=plan,
+            # income_auto when tied to a transaction — this shares the
+            # once-per-transaction guarantee with the backend auto-apply.
+            trigger="income_auto" if txn is not None else "manual_apply",
+            transaction_id=txn.id if txn is not None else None,
+            income_amount=payload.income_amount if txn is None else txn.amount,
+            config_id=active_cfg.id if active_cfg is not None else None,
+            config_version=active_cfg.version if active_cfg is not None else None,
+        )
+        await db.commit()
+    except IntegrityError:
+        # A concurrent apply won the race on the once-per-transaction index.
+        await db.rollback()
+        if txn is not None:
+            existing = await _income_auto_log_for_txn(db, current_user.id, txn.id)
+            if existing is not None:
+                return _apply_out(existing, warnings=[], already_applied=True)
+        raise
 
-    await db.commit()
-    return DistributionApplyOut(
-        run_id=log.id,
-        cash_before=cash_available,
-        cash_after=log.cash_after,
-        total_distributed=Decimal(str(log.cash_before)) - Decimal(str(log.cash_after)),
-        warnings=[],
-    )
+    return _apply_out(log, warnings=warnings, already_applied=False)

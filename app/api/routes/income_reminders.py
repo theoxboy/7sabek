@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -19,6 +20,19 @@ from app.schemas.income_reminder import (
 )
 
 router = APIRouter(prefix="/income-reminders")
+
+
+def _today_in_tz(tz_name: Optional[str]) -> date:
+    """Calendar date "now" in the reminder's timezone.
+
+    A reminder near midnight local time must not roll to the wrong day just
+    because the server clock is on UTC.
+    """
+    try:
+        tz = ZoneInfo(tz_name) if tz_name else timezone.utc
+    except Exception:
+        tz = timezone.utc
+    return datetime.now(tz).date()
 
 
 def _last_day_of_month(year: int, month: int) -> int:
@@ -80,18 +94,31 @@ def _compute_next_due(
     day_of_week: Optional[int],
     due_date: Optional[date],
     last_declared_on: Optional[date],
+    previous_due: Optional[date] = None,
 ) -> Optional[date]:
     if frequency == "one_off":
         return due_date
     if frequency == "weekly":
+        # Re-anchor to the scheduled weekday so declaring a day late does not
+        # drift the cadence permanently. Fall back to +7d only when no weekday
+        # is on the reminder.
+        if day_of_week is not None:
+            anchor = last_declared_on or base_date
+            return _next_weekly_date(anchor + timedelta(days=1), day_of_week)
         if last_declared_on is not None:
             return last_declared_on + timedelta(days=7)
-        if day_of_week is None:
-            raise ValueError("day_of_week required")
-        return _next_weekly_date(base_date, day_of_week)
+        raise ValueError("day_of_week required")
     if frequency == "bi_weekly":
         if last_declared_on is None:
             raise ValueError("last_declared_on required")
+        # Keep the 15-day grid anchored to the original schedule; roll it
+        # forward past the declaration date rather than restarting from the
+        # click, so a late declaration does not shift every future date.
+        if previous_due is not None:
+            candidate = previous_due + timedelta(days=15)
+            while candidate <= last_declared_on:
+                candidate += timedelta(days=15)
+            return candidate
         return last_declared_on + timedelta(days=15)
     if frequency == "monthly":
         if day_of_month is None:
@@ -167,7 +194,7 @@ async def create_income_reminder(
     current_user: User = Depends(get_current_user),
 ) -> IncomeReminderOut:
     _validate_payload(payload)
-    base_date = payload.last_declared_on or date.today()
+    base_date = payload.last_declared_on or _today_in_tz(payload.timezone)
     if payload.frequency == "monthly" and payload.day_of_month is None:
         payload.day_of_month = base_date.day
     if payload.frequency == "weekly" and payload.day_of_week is None:
@@ -219,17 +246,27 @@ async def update_income_reminder(
 
     _validate_payload(payload)
 
+    fields_sent = payload.model_fields_set
+    frequency_changed = (
+        payload.frequency is not None and payload.frequency != reminder.frequency
+    )
+
     if payload.name is not None:
         reminder.name = payload.name
     if payload.frequency is not None:
         reminder.frequency = payload.frequency
-    if payload.day_of_month is not None or payload.frequency is not None:
+
+    # Only overwrite a schedule field when the client actually sent it. When the
+    # frequency genuinely changes, fields that no longer apply are additionally
+    # reset - but a PATCH that merely repeats the current frequency must not
+    # silently wipe day_of_month / day_of_week and re-derive them from "today".
+    if "day_of_month" in fields_sent or frequency_changed:
         reminder.day_of_month = payload.day_of_month
-    if payload.day_of_month_alt is not None or payload.frequency is not None:
+    if "day_of_month_alt" in fields_sent or frequency_changed:
         reminder.day_of_month_alt = payload.day_of_month_alt
-    if payload.day_of_week is not None or payload.frequency is not None:
+    if "day_of_week" in fields_sent or frequency_changed:
         reminder.day_of_week = payload.day_of_week
-    if payload.due_date is not None or payload.frequency is not None:
+    if "due_date" in fields_sent or frequency_changed:
         reminder.due_date = payload.due_date
     if payload.timezone is not None:
         reminder.timezone = payload.timezone
@@ -238,7 +275,7 @@ async def update_income_reminder(
     if payload.last_declared_on is not None:
         reminder.last_declared_on = payload.last_declared_on
 
-    base_date = reminder.last_declared_on or date.today()
+    base_date = reminder.last_declared_on or _today_in_tz(reminder.timezone)
     if reminder.frequency == "monthly" and reminder.day_of_month is None:
         reminder.day_of_month = base_date.day
     if reminder.frequency == "weekly" and reminder.day_of_week is None:
@@ -279,7 +316,7 @@ async def mark_income_declared(
     if reminder is None:
         raise HTTPException(status_code=404, detail="reminder not found")
 
-    today = date.today()
+    today = _today_in_tz(reminder.timezone)
     reminder.last_declared_on = today
 
     if reminder.frequency == "one_off":
@@ -294,6 +331,7 @@ async def mark_income_declared(
             reminder.day_of_week,
             reminder.due_date,
             reminder.last_declared_on,
+            previous_due=reminder.next_due_on,
         )
         reminder.next_due_on = next_due_on
 

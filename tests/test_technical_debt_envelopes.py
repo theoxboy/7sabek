@@ -43,13 +43,62 @@ def test_create_envelope_rollover_restrictions(client: TestClient) -> None:
     assert response.status_code == 201
     groceries_id = response.json()["id"]
 
-    # 5. Try to rename this normal envelope to a name with debt keyword -> should fail with 400
+    # 5. Renaming a normal envelope to a debt-ish name no longer auto-locks it:
+    #    is_debt is an explicit flag, not re-derived from the name on every edit.
     response = client.patch(
         f"/envelopes/{groceries_id}",
         json={"name": "my credit card"},
     )
+    assert response.status_code == 200
+    assert response.json()["is_debt"] is False
+
+    # 6. Marking it a debt explicitly, while rollover is off, is rejected until
+    #    rollover is turned on.
+    response = client.patch(f"/envelopes/{groceries_id}", json={"is_debt": True})
     assert response.status_code == 400
     assert response.json()["detail"] == "ENVELOPE_ROLLOVER_OFF_FORBIDDEN_FOR_PROFILE"
+    response = client.patch(
+        f"/envelopes/{groceries_id}", json={"is_debt": True, "rollover_enabled": True}
+    )
+    assert response.status_code == 200
+    assert response.json()["is_debt"] is True
+
+
+def test_is_debt_flag_is_explicit_and_correctable(client: TestClient) -> None:
+    """The core fix: is_debt is a real flag, seeded from a heuristic but
+    overridable — a typo'd name no longer strands the fund, a false positive
+    no longer force-locks a normal envelope."""
+    user = create_user(client)
+
+    # A debt fund whose name misses every keyword can still be marked a debt.
+    response = client.post(
+        "/envelopes",
+        json={"name": "Detes voiture", "rollover_enabled": True, "is_debt": True},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["is_debt"] is True
+
+    # "Salaf" — the app's own word for a loan — is now caught by the heuristic.
+    response = client.post(
+        "/envelopes", json={"name": "Salaf 3and Ahmed", "rollover_enabled": True}
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["is_debt"] is True
+
+    # A false positive ("Carte de crédit" as a normal spending envelope) can be
+    # opted out and then turned into a swept flexible envelope.
+    response = client.post(
+        "/envelopes", json={"name": "Carte de crédit", "rollover_enabled": True}
+    )
+    assert response.status_code == 201
+    cc_id = response.json()["id"]
+    assert response.json()["is_debt"] is True
+    response = client.patch(
+        f"/envelopes/{cc_id}", json={"is_debt": False, "rollover_enabled": False}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["is_debt"] is False
+    assert response.json()["rollover_enabled"] is False
 
 
 def test_delete_envelope_cascades_rules(client: TestClient) -> None:

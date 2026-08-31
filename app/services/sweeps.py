@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +14,8 @@ from app.services.envelope_rules import is_sweep_eligible_envelope
 from app.services.periods import period_bounds
 from app.services.sweep_context import resolve_user_sweep_anchor_date
 from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS_SQL
+
+logger = logging.getLogger(__name__)
 
 
 async def _get_or_create_period(
@@ -44,6 +47,29 @@ async def _get_or_create_period(
     db.add(period)
     await db.flush()
     return period
+
+
+async def _income_declared_in_window(
+    db: AsyncSession, user_id: UUID, period_start: date, period_end: date
+) -> bool:
+    """Was a salary-type income declared in [period_start, period_end)?
+
+    A cycle only closes once its income is on the books — otherwise a sweep
+    would consolidate the previous cycle's leftovers before the user has told
+    the app they were paid.
+    """
+    result = await db.execute(
+        select(func.count(Transaction.id))
+        .join(Category, Transaction.category_id == Category.id)
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.type == TransactionType.INCOME,
+            Category.name.in_(INTERNAL_INCOME_CATEGORY_KEYS_SQL),
+            Transaction.occurred_on >= period_start,
+            Transaction.occurred_on < period_end,
+        )
+    )
+    return int(result.scalar_one()) > 0
 
 
 async def _resolve_force_period_start(
@@ -96,6 +122,12 @@ async def run_sweep(
         )
         if period_end != as_of:
             raise ValueError("as_of must align with the exclusive period end")
+
+        # A period does not close until its income has been declared. The
+        # force path (early payday) is itself driven by an income declaration,
+        # so it is exempt.
+        if not await _income_declared_in_window(db, user.id, period_start, period_end):
+            return 0, 0
 
     default_result = await db.execute(
         select(Envelope).where(
@@ -243,6 +275,10 @@ async def preview_sweep(
     if period_end != as_of:
         raise ValueError("as_of must align with the exclusive period end")
 
+    # Nothing to preview until the period's income is declared.
+    if not await _income_declared_in_window(db, user.id, period_start, period_end):
+        return []
+
     default_result = await db.execute(
         select(Envelope).where(
             Envelope.user_id == user.id,
@@ -299,7 +335,11 @@ async def run_due_sweeps(
     user: User,
     today: date,
 ) -> tuple[int, int]:
-    # Serialize auto-sweep by user to reduce race conditions across concurrent requests.
+    # Take a per-user row lock to serialize concurrent auto-sweep entries. Note
+    # the first run_sweep() below commits, which releases this lock, so a
+    # multi-period backlog past the first period runs unlocked — the per-period
+    # `already_swept` check and the IntegrityError catch are what prevent a
+    # double sweep there, not this lock.
     locked_user_result = await db.execute(
         select(User).where(User.id == user.id).with_for_update()
     )
@@ -369,3 +409,46 @@ async def run_due_sweeps(
         sweeps_created_total += sweeps_created
 
     return periods_swept_total, sweeps_created_total
+
+
+async def run_due_sweeps_tracked(
+    db: AsyncSession, user: User, today: date
+) -> tuple[int, int]:
+    """`run_due_sweeps` wrapped so a failure is not silent.
+
+    Auto-sweep runs opportunistically (login / transaction create) as a
+    best-effort side effect. On failure this records a marker on the user so
+    the dashboard can surface it; a later success clears it. Never raises.
+    """
+    user_id = user.id
+    try:
+        result = await run_due_sweeps(db, user, today)
+    except Exception as exc:  # noqa: BLE001 - best-effort side effect
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        try:
+            await db.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(
+                    last_auto_sweep_error_at=func.now(),
+                    last_auto_sweep_error=str(exc)[:500],
+                )
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+        logger.exception("auto_sweep_failed", extra={"user_id": str(user_id)})
+        return 0, 0
+
+    # Clear a stale marker only if one is set (no write, no commit otherwise).
+    cleared = await db.execute(
+        update(User)
+        .where(User.id == user_id, User.last_auto_sweep_error_at.isnot(None))
+        .values(last_auto_sweep_error_at=None, last_auto_sweep_error=None)
+    )
+    if cleared.rowcount:
+        await db.commit()
+    return result

@@ -37,10 +37,8 @@ from app.services.transactions import (
     propagate_period_balances,
 )
 from app.services.sweep_context import resolve_user_sweep_anchor_date
-from app.services.sweeps import run_due_sweeps
+from app.services.sweeps import run_due_sweeps_tracked
 from app.services.gamification import to_local_date
-from app.services.periods import get_effective_income_date
-from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEYS
 
 
 router = APIRouter(prefix="/transactions")
@@ -87,15 +85,12 @@ async def create_transaction(
     # needs a lazy reload that raises under async SQLAlchemy rather than
     # reloading - so this id would be unreadable once the sweeps have run.
     transaction_id = transaction.id
-    user_id = current_user.id
 
-    try:
-        await run_due_sweeps(db, current_user, to_local_date(datetime.now(timezone.utc)))
-    except Exception:
-        logger.exception(
-            "auto_sweep_failed_on_transaction_create",
-            extra={"user_id": str(user_id), "transaction_id": str(transaction_id)},
-        )
+    # Records a marker on failure (surfaced on the dashboard) instead of failing
+    # silently; never raises.
+    await run_due_sweeps_tracked(
+        db, current_user, to_local_date(datetime.now(timezone.utc))
+    )
 
     # Loaded after the sweeps rather than before, so the object handed to the
     # response serialiser is live instead of expired.
@@ -225,24 +220,12 @@ async def update_transaction(
     # 5. Appliquer les mouvements et distributions sur la nouvelle enveloppe
     if envelope is not None:
         anchor_date = await resolve_user_sweep_anchor_date(db, current_user)
-        category_result = await db.execute(
-            select(Category).where(
-                Category.id == new_category_id,
-                Category.user_id == current_user.id,
-            )
-        )
-        new_category = category_result.scalar_one_or_none()
-        effective_occurred_on = new_occurred_on
-        if new_type == TransactionType.INCOME and new_category is not None and new_category.name in INTERNAL_INCOME_CATEGORY_KEYS:
-            effective_occurred_on = get_effective_income_date(
-                new_occurred_on, anchor_date, current_user.sweep_interval_days
-            )
 
         period = await get_or_create_envelope_period(
             db,
             current_user.id,
             envelope.id,
-            effective_occurred_on,
+            new_occurred_on,
             current_user.sweep_interval_days,
             anchor_date,
         )
@@ -261,7 +244,7 @@ async def update_transaction(
                 user=current_user,
                 transaction_id=transaction.id,
                 amount=new_amount,
-                occurred_on=effective_occurred_on,
+                occurred_on=new_occurred_on,
                 period_start=period.period_start,
                 period_end=period.period_end,
             )
@@ -269,24 +252,12 @@ async def update_transaction(
     # 6. Propager également l'ancienne enveloppe si elle est différente de la nouvelle ou si la date a changé
     if old_envelope is not None:
         anchor_date = await resolve_user_sweep_anchor_date(db, current_user)
-        old_category_result = await db.execute(
-            select(Category).where(
-                Category.id == transaction.category_id,
-                Category.user_id == current_user.id,
-            )
-        )
-        old_category = old_category_result.scalar_one_or_none()
-        old_effective_occurred_on = old_occurred_on
-        if old_type == TransactionType.INCOME and old_category is not None and old_category.name in INTERNAL_INCOME_CATEGORY_KEYS:
-            old_effective_occurred_on = get_effective_income_date(
-                old_occurred_on, anchor_date, current_user.sweep_interval_days
-            )
 
         old_period = await get_or_create_envelope_period(
             db,
             current_user.id,
             old_envelope.id,
-            old_effective_occurred_on,
+            old_occurred_on,
             current_user.sweep_interval_days,
             anchor_date,
         )

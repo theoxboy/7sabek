@@ -27,7 +27,7 @@ from app.models import (
     User,
 )
 from app.services.balances import compute_period_balance
-from app.services.periods import period_bounds, get_effective_income_date
+from app.services.periods import period_bounds
 from app.services.sweep_context import resolve_user_sweep_anchor_date
 from app.services.distribution_engine import (
     DistributionContext,
@@ -491,17 +491,15 @@ async def create_transaction_with_effects(
             anchor_date = await resolve_user_sweep_anchor_date(db, user)
 
         envelope = await resolve_cash_envelope(db, user.id)
-        effective_occurred_on = occurred_on
-        if category.name in INTERNAL_INCOME_CATEGORY_KEYS:
-            if permanent_shift is None:
-                effective_occurred_on = get_effective_income_date(
-                    occurred_on, anchor_date, user.sweep_interval_days
-                )
+        # The income lands in the period that actually contains its date. No
+        # buffer / forced alignment: the sweep "income declared" gate keys off
+        # Transaction.occurred_on, so the money and the gate must agree on the
+        # period, and an end-of-cycle income must be usable in the current cycle.
         period = await get_or_create_envelope_period(
             db,
             user.id,
             envelope.id,
-            effective_occurred_on,
+            occurred_on,
             user.sweep_interval_days,
             anchor_date,
         )
@@ -520,9 +518,9 @@ async def create_transaction_with_effects(
             else []
         )
         if rules:
-            cash_available = await cash_available_for_period(db, user, effective_occurred_on)
+            cash_available = await cash_available_for_period(db, user, occurred_on)
             ctx = DistributionContext(
-                occurred_on=effective_occurred_on,
+                occurred_on=occurred_on,
                 period_start=period.period_start,
                 period_end=period.period_end,
             )

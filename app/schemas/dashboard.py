@@ -75,6 +75,9 @@ class SweepStatusOut(BaseModel):
     period_end: date
     income_declared: bool
     already_swept: bool
+    # True when the last opportunistic auto-sweep (login / transaction) failed
+    # and has not since recovered. The period stays open until a sweep runs.
+    auto_sweep_error: bool = False
 
 
 class SweepBootstrapOut(BaseModel):

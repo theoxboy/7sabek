@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -145,6 +146,36 @@ def extract_sweep_bootstrap(
     }
 
 
+def clamp_anchor_to_fixed_pay_day(
+    anchor: date, answers: dict[str, Any] | None, sweep_interval_days: int
+) -> date:
+    """Snap a monthly anchor onto the user's declared fixed pay day.
+
+    The sweep grid for a 30-day cycle is day-of-month aligned, so the anchor
+    must sit on the real payday. No-op for weekly/bi-weekly cadences or when no
+    fixed day was captured. Shared by onboarding apply and the runtime anchor
+    resolver so both agree on the same date.
+    """
+    if sweep_interval_days != 30:
+        return anchor
+    answers = answers if isinstance(answers, dict) else {}
+    fixed_day_raw = (
+        answers.get("S4a_fixed_day")
+        or answers.get("M2b_monthly_fixed_day")
+        or answers.get("F3a_retainer_fixed_day")
+    )
+    if not fixed_day_raw:
+        return anchor
+    try:
+        fixed_day = int(fixed_day_raw)
+    except (ValueError, TypeError):
+        return anchor
+    if not 1 <= fixed_day <= 31:
+        return anchor
+    last_day = calendar.monthrange(anchor.year, anchor.month)[1]
+    return date(anchor.year, anchor.month, min(fixed_day, last_day))
+
+
 async def get_latest_onboarding_record(
     db: AsyncSession, user_id
 ) -> OnboardingV2Record | None:
@@ -183,21 +214,18 @@ async def resolve_user_sweep_anchor_date(db: AsyncSession, user: User) -> date:
                 pass
 
         answers = record.payload.get("answers")
+        answers_dict = answers if isinstance(answers, dict) else {}
         draft_objects = record.payload.get("draft_objects")
         bootstrap = extract_sweep_bootstrap(
-            answers=answers if isinstance(answers, dict) else {},
+            answers=answers_dict,
             draft_objects=draft_objects if isinstance(draft_objects, dict) else {},
         )
-        if bootstrap:
-            bootstrap_date = bootstrap.get("last_income_date")
-            if isinstance(bootstrap_date, date):
-                new_payload = dict(record.payload)
-                new_payload["sweep_anchor_date"] = bootstrap_date.isoformat()
-                record.payload = new_payload
-                db.add(record)
-                await db.flush()
-                return bootstrap_date
 
+        resolved: date | None = None
+        bootstrap_date = bootstrap.get("last_income_date") if bootstrap else None
+        if isinstance(bootstrap_date, date):
+            resolved = bootstrap_date
+        elif bootstrap:
             completed_at = get_onboarding_completed_at(record)
             first_income_result = await db.execute(
                 select(Transaction.occurred_on)
@@ -213,12 +241,24 @@ async def resolve_user_sweep_anchor_date(db: AsyncSession, user: User) -> date:
             )
             first_income_occurred_on = first_income_result.scalar_one_or_none()
             if isinstance(first_income_occurred_on, date):
-                new_payload = dict(record.payload)
-                new_payload["sweep_anchor_date"] = first_income_occurred_on.isoformat()
-                record.payload = new_payload
-                db.add(record)
-                await db.flush()
-                return first_income_occurred_on
+                resolved = first_income_occurred_on
+
+        # No declared last pay day and no income yet: pin the signup date so the
+        # grid is still deterministic. Whatever we land on, it is cached now and
+        # never re-derived - the first manual income must not silently shift the
+        # whole period grid.
+        if resolved is None:
+            resolved = user.created_at.date() if user.created_at else date.today()
+
+        resolved = clamp_anchor_to_fixed_pay_day(
+            resolved, answers_dict, user.sweep_interval_days
+        )
+        new_payload = dict(record.payload)
+        new_payload["sweep_anchor_date"] = resolved.isoformat()
+        record.payload = new_payload
+        db.add(record)
+        await db.flush()
+        return resolved
     return user.created_at.date()
 
 

@@ -244,6 +244,7 @@ async def _sweep_status_for_range(
         period_end=period_end,
         income_declared=income_declared,
         already_swept=already_swept,
+        auto_sweep_error=current_user.last_auto_sweep_error_at is not None,
     )
 
 

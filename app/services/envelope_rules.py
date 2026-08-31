@@ -9,23 +9,41 @@ if TYPE_CHECKING:
 
 _MULTISPACE_RE = re.compile(r"\s+")
 _RESERVED_ENVELOPE_KEYS = {"cash", "epargnes"}
+
+# Only a *heuristic*: used to seed the explicit `envelopes.is_debt` column at
+# creation and to backfill it once. The column, not this list, is what the
+# sweep and the rollover guard actually read — a name that slips past these
+# keywords no longer strands the fund, it is just a data value to correct.
 _DEBT_KEYWORDS = (
+    "dette",
     "dettes",
     "debt",
     "debts",
     "credit",
     "crédit",
     "crédits",
+    "kredit",
+    "كريدي",
     "repayment",
     "repayments",
     "loan",
     "loans",
+    "salaf",
+    "سلف",
     "دين",
     "الديون",
     "ديون",
     "قرض",
     "قروض",
 )
+
+
+def name_looks_like_debt(name: str | None) -> bool:
+    """Heuristic debt-name match. Seeds `is_debt` at creation; never the sole gate."""
+    if not name:
+        return False
+    key = name_key(name)
+    return any(keyword in key for keyword in _DEBT_KEYWORDS)
 
 
 
@@ -60,11 +78,13 @@ def is_sweep_eligible_envelope(envelope: Envelope) -> bool:
         not envelope.is_cash
         and not envelope.is_default_savings
         and not envelope.is_goal
+        and not bool(getattr(envelope, "is_debt", False))
         and not envelope.rollover_enabled
     )
 
 
 def is_rollover_off_forbidden_envelope(envelope: Envelope) -> bool:
-    key = name_key(envelope.name)
-    is_debt = any(keyword in key for keyword in _DEBT_KEYWORDS)
-    return envelope.is_goal or is_debt
+    # Reads the explicit is_debt flag now, not a live name match — so a debt
+    # envelope whose name doesn't hit the keywords is still protected once the
+    # flag is set, and a false-positive name can be corrected by clearing it.
+    return envelope.is_goal or bool(getattr(envelope, "is_debt", False))

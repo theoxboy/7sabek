@@ -4,6 +4,7 @@ import asyncio
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import asyncpg
@@ -182,6 +183,7 @@ def test_sweep_moves_leftover_to_savings(client: TestClient, database_url: str) 
 
     category_a = create_category(client, user["id"], "Cat A")
     category_b = create_category(client, user["id"], "Cat B")
+    income_category = create_category(client, user["id"], "income_general")
 
     map_category(client, user["id"], category_a["id"], envelope_a["id"])
     map_category(client, user["id"], category_b["id"], envelope_b["id"])
@@ -191,6 +193,18 @@ def test_sweep_moves_leftover_to_savings(client: TestClient, database_url: str) 
         anchor, anchor + timedelta(days=1), user["sweep_interval_days"]
     )
     occurred_on = period_start + timedelta(days=1)
+
+    # A cycle only closes once its income is declared.
+    client.post(
+        "/transactions",
+        json={
+            "type": "income",
+            "category_id": income_category["id"],
+            "amount": "1000.00",
+            "occurred_on": occurred_on.isoformat(),
+            "description": "Salary",
+        },
+    )
 
     client.post(
         f"/envelopes/{envelope_a['id']}/allocate",
@@ -266,6 +280,52 @@ def test_sweep_moves_leftover_to_savings(client: TestClient, database_url: str) 
     assert next_b["opening_balance"] == "0.00"
 
 
+def test_sweep_does_nothing_until_income_is_declared(
+    client: TestClient, database_url: str
+) -> None:
+    user = create_user(client, "sweep-needs-income@example.com")
+    envelope = create_envelope(client, user["id"], "Flex")
+    category = create_category(client, user["id"], "Flex Cat")
+    income_category = create_category(client, user["id"], "income_general")
+    map_category(client, user["id"], category["id"], envelope["id"])
+
+    anchor = fetch_user_anchor_date(database_url, user["id"])
+    period_start, period_end = period_bounds(
+        anchor, anchor + timedelta(days=1), user["sweep_interval_days"]
+    )
+    occurred_on = period_start + timedelta(days=1)
+
+    client.post(
+        f"/envelopes/{envelope['id']}/allocate",
+        json={"amount": "120.00", "occurred_on": occurred_on.isoformat()},
+    )
+
+    # No income declared yet -> the manual sweep is a no-op, the leftover stays.
+    preview = client.post("/sweeps/preview", json={"as_of": period_end.isoformat()})
+    assert preview.status_code == 200
+    assert preview.json() == []
+    run = client.post("/sweeps", json={"as_of": period_end.isoformat()})
+    assert run.status_code == 200
+    assert run.json() == {"periods_swept": 0, "sweeps_created": 0}
+    assert fetch_sweeps_count_for_date(database_url, user["id"], period_end) == 0
+
+    # Declare the income -> the same sweep now consolidates the leftover.
+    client.post(
+        "/transactions",
+        json={
+            "type": "income",
+            "category_id": income_category["id"],
+            "amount": "1000.00",
+            "occurred_on": occurred_on.isoformat(),
+            "description": "Salary",
+        },
+    )
+    preview = client.post("/sweeps/preview", json={"as_of": period_end.isoformat()})
+    assert len(preview.json()) == 1
+    run = client.post("/sweeps", json={"as_of": period_end.isoformat()})
+    assert run.json()["sweeps_created"] == 1
+
+
 def test_sweep_endpoint_alias(client: TestClient, database_url: str) -> None:
     user = create_user(client, "sweep-alias@example.com")
 
@@ -274,13 +334,60 @@ def test_sweep_endpoint_alias(client: TestClient, database_url: str) -> None:
         anchor, anchor + timedelta(days=1), user["sweep_interval_days"]
     )
 
-    response = client.post(
-        "/sweeps", json={"as_of": period_end.isoformat()}
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert "periods_swept" in data
-    assert "sweeps_created" in data
+    for path in ("/sweeps", "/sweeps/run"):
+        response = client.post(path, json={"as_of": period_end.isoformat()})
+        assert response.status_code == 200, path
+        data = response.json()
+        assert "periods_swept" in data
+        assert "sweeps_created" in data
+
+
+def test_sweep_rejects_unaligned_as_of_with_400(client: TestClient, database_url: str) -> None:
+    user = create_user(client, "sweep-unaligned@example.com")
+    anchor = fetch_user_anchor_date(database_url, user["id"])
+    # 3 days past the anchor is never an exclusive period end for a 7-day grid.
+    unaligned = (anchor + timedelta(days=3)).isoformat()
+
+    for path in ("/sweeps", "/sweeps/run", "/sweeps/preview"):
+        response = client.post(path, json={"as_of": unaligned})
+        assert response.status_code == 400, path
+        assert "align" in response.json()["detail"].lower()
+
+
+def test_auto_sweep_failure_is_surfaced_then_cleared(
+    client: TestClient, database_url: str
+) -> None:
+    user = create_user(client, "sweep-auto-error@example.com")
+    income_category = create_category(client, user["id"], "income_general")
+
+    def _declare_income(amount: str) -> None:
+        resp = client.post(
+            "/transactions",
+            json={
+                "type": "income",
+                "category_id": income_category["id"],
+                "amount": amount,
+                "occurred_on": date.today().isoformat(),
+                "description": "salary",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+
+    # Auto-sweep raises on transaction create -> the transaction still succeeds,
+    # and the dashboard flags the failed auto-sweep.
+    with patch(
+        "app.services.sweeps.run_due_sweeps",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        _declare_income("1000.00")
+
+    dash = client.get("/dashboard").json()
+    assert dash["sweep_status"]["auto_sweep_error"] is True
+
+    # A later successful auto-sweep clears the marker.
+    _declare_income("1000.00")
+    dash = client.get("/dashboard").json()
+    assert dash["sweep_status"]["auto_sweep_error"] is False
 
 
 def test_auto_sweep_runs_on_login_when_due(client: TestClient, database_url: str) -> None:

@@ -70,7 +70,7 @@ from app.services.onboarding_v2_record_state import (
     coerce_record_stage_for_write,
 )
 from app.services.profile_photo import normalize_profile_photo_url
-from app.services.sweeps import run_due_sweeps
+from app.services.sweeps import run_due_sweeps_tracked
 from app.services.gamification import to_local_date
 from app.services.recaptcha import verify_recaptcha_token
 from app.schemas.auth import (
@@ -902,10 +902,9 @@ async def login(
     if user.must_reset_password:
         raise HTTPException(status_code=403, detail="PASSWORD_RESET_REQUIRED")
 
-    try:
-        await run_due_sweeps(db, user, to_local_date(datetime.now(timezone.utc)))
-    except Exception:
-        logger.exception("auto_sweep_failed_on_login", extra={"user_id": str(user.id)})
+    # Records a marker on failure (surfaced on the dashboard) instead of failing
+    # silently; never raises.
+    await run_due_sweeps_tracked(db, user, to_local_date(datetime.now(timezone.utc)))
 
     if user.role == "superadmin":
         validate_superadmin_geo(payload.geo_lat, payload.geo_lng)

@@ -63,6 +63,11 @@ class DistributionApplyRequest(BaseModel):
     income_amount: Optional[Decimal] = Field(default=None, gt=0)
     use_cash_available: bool = True
     occurred_on: Optional[date] = None
+    # Pass the id of the income transaction this apply belongs to. The run is
+    # then idempotent per transaction: if the transaction already triggered a
+    # distribution (backend auto-apply on create, or a retry), this is a no-op
+    # that returns the existing run.
+    transaction_id: Optional[UUID] = None
 
 
 class DistributionApplyOut(BaseModel):
@@ -71,6 +76,9 @@ class DistributionApplyOut(BaseModel):
     cash_after: Decimal
     total_distributed: Decimal
     warnings: List[str]
+    # True when this call matched an already-recorded distribution for the
+    # transaction and did nothing.
+    already_applied: bool = False
 
 
 class DistributionSavedRowIn(BaseModel):

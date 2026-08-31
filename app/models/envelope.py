@@ -54,6 +54,12 @@ class Envelope(Base):
     )
     is_cash: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_goal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Explicit debt flag. Seeded from a name heuristic at creation and by a
+    # one-time backfill, but authoritative thereafter: the sweep and the
+    # rollover guard read this column, not the name.
+    is_debt: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     deletable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -69,12 +75,6 @@ class Envelope(Base):
     category_mappings: Mapped[List["CategoryEnvelopeMap"]] = relationship(
         back_populates="envelope"
     )
-
-    @property
-    def is_debt(self) -> bool:
-        from app.services.envelope_rules import name_key, _DEBT_KEYWORDS
-        key = name_key(self.name)
-        return any(keyword in key for keyword in _DEBT_KEYWORDS)
 
     @validates("name")
     def validate_name(self, key, value):

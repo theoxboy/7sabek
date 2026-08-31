@@ -41,6 +41,12 @@ class User(Base):
     auto_sweep_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
     )
+    # Set when a best-effort auto-sweep (login / transaction create) raises;
+    # cleared by the next successful auto-sweep. Surfaced on the dashboard.
+    last_auto_sweep_error_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_auto_sweep_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     phone_number: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)

@@ -38,13 +38,3 @@ def period_bounds(
         return period_start, period_end
 
 
-def get_effective_income_date(
-    occurred_on: date, anchor_date: date, sweep_interval_days: int
-) -> date:
-    normal_start, normal_end = period_bounds(anchor_date, occurred_on, sweep_interval_days)
-    buffer_days = min(5, sweep_interval_days // 2)
-    if buffer_days > 0 and normal_end - timedelta(days=buffer_days) <= occurred_on < normal_end:
-        return normal_end
-    return occurred_on
-
-

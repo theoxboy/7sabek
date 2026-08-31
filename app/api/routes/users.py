@@ -6,7 +6,7 @@ from uuid import UUID
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import delete, func, select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -1443,6 +1443,13 @@ async def restore_user_by_id(
 async def purge_user_by_id(
     user_id: UUID,
     request: Request,
+    force: bool = Query(
+        default=False,
+        description=(
+            "Bypass the 30-day recovery window. Superadmin only, explicit opt-in, "
+            "logged as a forced purge."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> None:
@@ -1452,6 +1459,34 @@ async def purge_user_by_id(
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # The 30-day recovery window is the default guard: an account must be
+    # soft-deleted and its grace period elapsed before it can be purged. A
+    # superadmin can override this with `force=true` when they insist.
+    within_grace = False
+    if not force:
+        if user.deleted_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="ACCOUNT_NOT_SOFT_DELETED",
+            )
+        settings = await get_platform_settings(db)
+        if is_within_deletion_grace(user, settings):
+            deadline = deletion_grace_deadline(user, settings)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "DELETION_GRACE_PERIOD_ACTIVE"
+                    if deadline is None
+                    else f"DELETION_GRACE_PERIOD_ACTIVE:{deadline.isoformat()}"
+                ),
+            )
+    else:
+        settings = await get_platform_settings(db)
+        within_grace = (
+            user.deleted_at is None or is_within_deletion_grace(user, settings)
+        )
+
     email = user.email
     await _delete_user_by_id(db, user_id)
     await db.commit()
@@ -1459,7 +1494,11 @@ async def purge_user_by_id(
         db,
         event_type="user_purged",
         status="warning",
-        message=f"Utilisateur supprimé définitivement: {email}",
+        message=(
+            f"Utilisateur supprimé définitivement (FORCÉ, période de grâce ignorée): {email}"
+            if force and within_grace
+            else f"Utilisateur supprimé définitivement (après période de grâce): {email}"
+        ),
         actor_email=current_user.email,
         actor_ip=get_client_ip(request),
     )

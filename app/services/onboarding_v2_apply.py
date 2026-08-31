@@ -23,7 +23,7 @@ from app.services.onboarding_distribution_validation import (
     validate_apply_preconditions,
 )
 from app.services.envelope_virtual import is_virtual_parent_envelope_name
-from app.services.envelope_rules import normalize_name
+from app.services.envelope_rules import name_looks_like_debt, normalize_name
 from app.services.onboarding_v2_canonical import (
     ExistingApplyState,
     compute_canonical_apply_state_backend,
@@ -31,7 +31,10 @@ from app.services.onboarding_v2_canonical import (
 from app.services.onboarding_v2_record_state import (
     build_onboarding_materialized_state as _build_onboarding_materialized_state,
 )
-from app.services.sweep_context import infer_sweep_interval_days_from_answers
+from app.services.sweep_context import (
+    clamp_anchor_to_fixed_pay_day,
+    infer_sweep_interval_days_from_answers,
+)
 from app.services.category_catalog import EXPENSE_CATEGORY_KEYS_SQL, category_key_from_name
 from app.services.category_system_seed import (
     build_system_category_mapping_plan,
@@ -454,24 +457,17 @@ async def apply_onboarding_v2_payload(
     bootstrap_anchor_date = _safe_date(
         canonical_state.cash_flow_timing_v1.get("last_income_date") or answers.get("SWP1_last_income_date")
     )
-    if isinstance(bootstrap_anchor_date, date):
-        if user.sweep_interval_days == 30:
-            fixed_day_raw = (
-                answers.get("S4a_fixed_day")
-                or answers.get("M2b_monthly_fixed_day")
-                or answers.get("F3a_retainer_fixed_day")
-            )
-            if fixed_day_raw:
-                try:
-                    fixed_day = int(fixed_day_raw)
-                    if 1 <= fixed_day <= 31:
-                        import calendar
-                        last_day = calendar.monthrange(bootstrap_anchor_date.year, bootstrap_anchor_date.month)[1]
-                        clamped_day = min(fixed_day, last_day)
-                        bootstrap_anchor_date = date(bootstrap_anchor_date.year, bootstrap_anchor_date.month, clamped_day)
-                except (ValueError, TypeError):
-                    pass
-        user.next_sweep_date = bootstrap_anchor_date + timedelta(days=user.sweep_interval_days)
+    if not isinstance(bootstrap_anchor_date, date):
+        # No declared last payday: fall back to the signup date so the sweep
+        # grid is still deterministic. This matches resolve_user_sweep_anchor_date's
+        # own fallback, so the two never disagree.
+        bootstrap_anchor_date = user.created_at.date() if user.created_at else date.today()
+    # Same clamp the runtime anchor resolver applies, so the grid is set on a
+    # real pay day when one was declared.
+    bootstrap_anchor_date = clamp_anchor_to_fixed_pay_day(
+        bootstrap_anchor_date, answers, user.sweep_interval_days
+    )
+    user.next_sweep_date = bootstrap_anchor_date + timedelta(days=user.sweep_interval_days)
 
     explicit_custom_category_pairs: list[tuple[str, str]] = []
     selected_envelopes_materialized: list[dict[str, Any]] = []
@@ -502,7 +498,12 @@ async def apply_onboarding_v2_payload(
 
         selected_envelope_name_keys.add(_name_key(final_name))
         summary["selected_envelopes_count"] += 1
-        final_rollover = bool(item.get("final_rollover_enabled"))
+        item_is_debt = (
+            _safe_string(item.get("group_key")) == "debts"
+            or name_looks_like_debt(final_name)
+        )
+        # A debt envelope must roll over — its repayment fund is never swept.
+        final_rollover = bool(item.get("final_rollover_enabled")) or item_is_debt
         if final_rollover:
             summary["selected_rollover_on_count"] += 1
 
@@ -525,6 +526,7 @@ async def apply_onboarding_v2_payload(
                 is_default_savings=False,
                 is_cash=False,
                 is_goal=False,
+                is_debt=item_is_debt,
                 deletable=True,
             )
             db.add(existing)
@@ -535,6 +537,9 @@ async def apply_onboarding_v2_payload(
             was_updated = renamed_existing
             if existing.rollover_enabled != final_rollover:
                 existing.rollover_enabled = final_rollover
+                was_updated = True
+            if item_is_debt and not existing.is_debt:
+                existing.is_debt = True
                 was_updated = True
             if was_updated:
                 summary["envelopes_updated"] += 1
@@ -864,62 +869,13 @@ async def apply_onboarding_v2_payload(
         summary=summary,
     )
 
-    # Flush the session to persist rules and envelopes before applying transaction effects.
+    # Persist rules and envelopes.
     await db.flush()
 
-    # Extract starting balance amount from sanity metrics
-    income_est = canonical_state.sanity_metrics.get("incomeEstimate")
-    try:
-        starting_balance_amount = Decimal(str(income_est)) if income_est else Decimal("0.00")
-    except (InvalidOperation, ValueError, TypeError):
-        starting_balance_amount = Decimal("0.00")
-
-    if starting_balance_amount > 0:
-        # Resolve anchor date and find current period start date
-        anchor_date = bootstrap_anchor_date
-        if not isinstance(anchor_date, date):
-            anchor_date = user.created_at.date() if user.created_at else date.today()
-
-        from app.services.periods import period_bounds
-        current_period_start, _ = period_bounds(anchor_date, date.today(), user.sweep_interval_days)
-
-        # Resolve default income category (income_general)
-        from app.services.category_catalog import INTERNAL_INCOME_CATEGORY_KEY
-        from app.models.transaction import TransactionType
-        from app.services.transactions import create_transaction_with_effects
-
-        income_category_key = _name_key(INTERNAL_INCOME_CATEGORY_KEY)
-        income_category = category_by_name.get(income_category_key)
-        if income_category is None:
-            db_res = await db.execute(
-                select(Category).where(
-                    Category.user_id == user.id,
-                    Category.name == INTERNAL_INCOME_CATEGORY_KEY,
-                )
-            )
-            income_category = db_res.scalar_one_or_none()
-            if income_category is None:
-                income_category = Category(
-                    user_id=user.id,
-                    name=INTERNAL_INCOME_CATEGORY_KEY,
-                )
-                db.add(income_category)
-                await db.flush()
-            category_by_name[income_category_key] = income_category
-
-        # Inject starting balance transaction and apply initial distribution rules
-        await create_transaction_with_effects(
-            db=db,
-            user=user,
-            category=income_category,
-            transaction_type=TransactionType.INCOME,
-            amount=starting_balance_amount,
-            occurred_on=current_period_start,
-            description="Starting Balance",
-            source="manual",
-            commit=False,
-            enforce_auto_distribution_flag=False,
-        )
+    # No synthetic "Starting Balance" income is injected here. The first real
+    # income is declared manually by the user after onboarding; that declaration
+    # is what seeds the cash envelope and runs the initial distribution. Until
+    # then the dashboard shows `needs_first_income_declaration`.
 
     return summary
 

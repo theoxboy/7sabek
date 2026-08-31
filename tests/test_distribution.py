@@ -102,6 +102,58 @@ def create_saved_config(
     return response.json()
 
 
+def test_income_apply_is_idempotent_per_transaction(client: TestClient) -> None:
+    """Both entry points (backend auto-apply on create, frontend /apply) can
+    fire for the same income without distributing it twice."""
+    create_user(client, "dist-idempotent@example.com")
+    fun = create_envelope(client, "Fun")
+    salary = create_category(client, "Salary")
+
+    # --- auto OFF: the frontend drives it via /apply, retried once ---
+    set_auto_distribution(client, False)
+    create_rule(
+        client, target_type="envelope", target_id=fun["id"], mode="percent",
+        percent="100", rank=1,
+    )
+    tx = create_income(client, salary["id"], "1000.00")
+    assert Decimal(str(client.get("/dashboard").json()["cash_balance"])) == Decimal("1000.00")
+
+    first = client.post(
+        "/distribution/apply",
+        json={"transaction_id": tx["id"], "use_cash_available": False},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["already_applied"] is False
+
+    second = client.post(
+        "/distribution/apply",
+        json={"transaction_id": tx["id"], "use_cash_available": False},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["already_applied"] is True
+    assert second.json()["run_id"] == first.json()["run_id"]
+
+    dash = client.get("/dashboard").json()
+    assert Decimal(str(dash["cash_balance"])) == Decimal("0.00")
+    assert envelope_closing_balance(dash, "Fun") == Decimal("1000.00")
+
+    # --- auto ON: the backend applies on create, /apply is then a no-op ---
+    set_auto_distribution(client, True)
+    tx2 = create_income(client, salary["id"], "500.00")
+    dash = client.get("/dashboard").json()
+    assert envelope_closing_balance(dash, "Fun") == Decimal("1500.00")  # +500 once
+
+    noop = client.post(
+        "/distribution/apply",
+        json={"transaction_id": tx2["id"], "use_cash_available": False},
+    )
+    assert noop.status_code == 200, noop.text
+    assert noop.json()["already_applied"] is True
+
+    dash = client.get("/dashboard").json()
+    assert envelope_closing_balance(dash, "Fun") == Decimal("1500.00")  # unchanged
+
+
 def test_income_auto_distribution_fixed_then_percent(client: TestClient) -> None:
     create_user(client, "dist-fixed-percent@example.com")
     loyer = create_envelope(client, "Loyer")
@@ -352,11 +404,13 @@ def test_apply_next_cycle_uses_effective_fixed_rules_when_config_has_no_fixed_ro
 ) -> None:
     create_user(client, "dist-apply-no-fixed@example.com")
     cfg = create_saved_config(client, name="percent-only", auto_enabled=True)
-    debt_env = create_envelope(client, "Debt Sandbox")
+    # Plain name: a "debt"-keyword name is rejected when created with rollover
+    # off, and this test only needs *an* envelope carrying a fixed rule.
+    fixed_env = create_envelope(client, "Sandbox Fixed")
     create_rule(
         client,
         target_type="envelope",
-        target_id=debt_env["id"],
+        target_id=fixed_env["id"],
         mode="fixed",
         amount="100.00",
         rank=1,

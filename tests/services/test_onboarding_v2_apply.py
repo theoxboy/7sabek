@@ -113,51 +113,36 @@ def test_apply_materializes_expense_envelopes_missing_from_e11_selection(databas
     asyncio.run(_run())
 
 
-def test_apply_onboarding_v2_payload_injects_starting_balance(database_url: str) -> None:
+def test_apply_onboarding_v2_payload_injects_no_starting_balance(database_url: str) -> None:
+    """Onboarding never seeds a synthetic income - the first real income is
+    declared manually by the user afterwards, and that is what seeds cash and
+    runs the initial distribution. Re-applying onboarding is therefore a no-op
+    for transactions (no duplicated "Starting Balance")."""
     answers = build_answers(include_explicit_envelope_answers=True, modernize=True)
+    answers["SWP2_last_income_amount"] = "4200"
 
     async def _run() -> None:
         sessionmaker = await _build_sessionmaker(database_url)
         async with sessionmaker() as db:
-            user = await _create_user_with_defaults(db, "apply-starting-balance@example.com")
-            
-            # Run apply onboarding
-            await apply_onboarding_v2_payload(
-                db,
-                user,
-                answers=answers,
-                draft_objects={},
-            )
-            await db.flush()
+            user = await _create_user_with_defaults(db, "apply-no-starting-balance@example.com")
 
-            # Assert that:
-            # 1. A starting balance transaction was created for the user
-            from app.models import Transaction, TransactionType
-            from decimal import Decimal
-            tx_res = await db.execute(
-                select(Transaction).where(
-                    Transaction.user_id == user.id,
-                    Transaction.type == TransactionType.INCOME,
+            for _ in range(2):  # applying twice must not create anything
+                await apply_onboarding_v2_payload(
+                    db, user, answers=answers, draft_objects={}
                 )
+                await db.flush()
+
+            from app.models import Transaction, EnvelopeMovement
+
+            tx_res = await db.execute(
+                select(Transaction).where(Transaction.user_id == user.id)
             )
-            txs = list(tx_res.scalars().all())
-            assert len(txs) == 1
-            tx = txs[0]
-            assert tx.amount == Decimal("6000.00")
-            from app.services.periods import period_bounds
-            expected_start, _ = period_bounds(date(2026, 4, 1), date.today(), 30)
-            assert tx.occurred_on == expected_start
+            assert list(tx_res.scalars().all()) == []
 
-
-
-
-            # 2. Envelope movements exist (reflecting transaction and its distribution)
-            from app.models import EnvelopeMovement
             m_res = await db.execute(
                 select(EnvelopeMovement).where(EnvelopeMovement.user_id == user.id)
             )
-            movements = list(m_res.scalars().all())
-            assert len(movements) > 0
+            assert list(m_res.scalars().all()) == []
 
     asyncio.run(_run())
 

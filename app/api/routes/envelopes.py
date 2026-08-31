@@ -44,6 +44,7 @@ from app.services.envelope_rules import (
     is_reserved_envelope_name,
     is_rollover_off_forbidden_envelope,
     name_key,
+    name_looks_like_debt,
     normalize_name,
 )
 from app.services.envelope_virtual import is_virtual_parent_envelope_name
@@ -140,6 +141,11 @@ async def create_envelope(
         user_id=current_user.id,
         name=normalized_name,
         rollover_enabled=payload.rollover_enabled,
+        is_debt=(
+            payload.is_debt
+            if payload.is_debt is not None
+            else name_looks_like_debt(normalized_name)
+        ),
     )
     if is_rollover_off_forbidden_envelope(envelope):
         if not payload.rollover_enabled:
@@ -209,6 +215,11 @@ async def update_envelope(
         ) is not None:
             raise HTTPException(status_code=400, detail="ENVELOPE_NAME_EXISTS")
         envelope.name = normalized_name
+
+    if payload.is_debt is not None:
+        if envelope.is_cash or envelope.is_default_savings or envelope.is_goal:
+            raise HTTPException(status_code=400, detail="ENVELOPE_DEBT_FLAG_NOT_ALLOWED")
+        envelope.is_debt = payload.is_debt
 
     if payload.rollover_enabled is not None:
         if envelope.is_default_savings:

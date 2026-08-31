@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import aliased
@@ -15,16 +15,25 @@ from app.services.gamification import award_fix_points_if_needed, to_local_date
 
 router = APIRouter(prefix="/sweeps")
 
+# `POST /sweeps` and `POST /sweeps/run` are aliases; keep one implementation.
+_SWEEP_DATE_NOT_ALIGNED = (
+    "SWEEP_DATE_NOT_ALIGNED: as_of must be a sweep period boundary."
+)
 
-@router.post("", response_model=SweepRunOut)
-async def run_sweeps_root(
+
+async def _run_sweeps(
     payload: SweepRun,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: AsyncSession,
+    current_user: User,
 ) -> SweepRunOut:
     # EnvelopePeriod.period_end is treated as exclusive end (start of next period).
-    preview = await preview_sweep(db, current_user, payload.as_of)
-    periods_swept, sweeps_created = await run_sweep(db, current_user, payload.as_of)
+    try:
+        preview = await preview_sweep(db, current_user, payload.as_of)
+        periods_swept, sweeps_created = await run_sweep(db, current_user, payload.as_of)
+    except ValueError as exc:
+        # e.g. as_of not aligned to the user's period grid. Surface a clean 400
+        # instead of the generic 500 wrapper.
+        raise HTTPException(status_code=400, detail=str(exc) or _SWEEP_DATE_NOT_ALIGNED) from exc
     if preview:
         await award_fix_points_if_needed(
             db,
@@ -36,6 +45,15 @@ async def run_sweeps_root(
         )
         await db.commit()
     return SweepRunOut(periods_swept=periods_swept, sweeps_created=sweeps_created)
+
+
+@router.post("", response_model=SweepRunOut)
+async def run_sweeps_root(
+    payload: SweepRun,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SweepRunOut:
+    return await _run_sweeps(payload, db, current_user)
 
 
 @router.post("/run", response_model=SweepRunOut)
@@ -44,20 +62,7 @@ async def run_sweeps(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SweepRunOut:
-    # EnvelopePeriod.period_end is treated as exclusive end (start of next period).
-    preview = await preview_sweep(db, current_user, payload.as_of)
-    periods_swept, sweeps_created = await run_sweep(db, current_user, payload.as_of)
-    if preview:
-        await award_fix_points_if_needed(
-            db,
-            current_user,
-            to_local_date(datetime.now(timezone.utc)),
-            event_type="fix_sweep",
-            points=30,
-            meta={"sweeps_created": sweeps_created},
-        )
-        await db.commit()
-    return SweepRunOut(periods_swept=periods_swept, sweeps_created=sweeps_created)
+    return await _run_sweeps(payload, db, current_user)
 
 
 @router.get("", response_model=list[SweepOut])
@@ -109,5 +114,8 @@ async def preview_sweeps(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[SweepPreviewItem]:
-    preview = await preview_sweep(db, current_user, payload.as_of)
+    try:
+        preview = await preview_sweep(db, current_user, payload.as_of)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or _SWEEP_DATE_NOT_ALIGNED) from exc
     return [SweepPreviewItem(**item) for item in preview]

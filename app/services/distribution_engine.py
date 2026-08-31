@@ -102,7 +102,7 @@ async def build_distribution_plan(
         return []
 
     from app.services.sweep_context import build_sweep_bootstrap_status
-    from app.services.envelope_rules import name_key, _DEBT_KEYWORDS
+    from app.services.envelope_rules import name_key, name_looks_like_debt
 
     bootstrap = await build_sweep_bootstrap_status(db, user)
     expected_income_str = bootstrap.get("expected_income_amount") if bootstrap else None
@@ -138,7 +138,7 @@ async def build_distribution_plan(
             env = envelopes_map.get(item.to_envelope_id)
             is_goal = item.target_type == "goal" or (env.is_goal if env else False)
             is_flex = name_key(item.target_name) in {name_key("flexibility"), name_key("flex"), name_key("المرونة")}
-            is_debt = env.is_debt if env else any(kw in name_key(item.target_name) for kw in _DEBT_KEYWORDS)
+            is_debt = env.is_debt if env else name_looks_like_debt(item.target_name)
 
             if is_goal:
                 goal_items.append(item)
@@ -287,28 +287,10 @@ async def build_distribution_plan(
     if total_percent <= 0:
         return plan
 
-    if Decimal("0.00") < total_percent < Decimal("100"):
-        envelope_result = await db.execute(
-            select(Envelope).where(
-                Envelope.user_id == user.id,
-                Envelope.is_default_savings.is_(True),
-            )
-        )
-        default_savings = envelope_result.scalar_one_or_none()
-        if default_savings is not None:
-            remainder_percent = Decimal("100") - total_percent
-            synthetic_rule = DistributionRule(
-                id=UUID("00000000-0000-0000-0000-000000000000"),
-                user_id=user.id,
-                target_type="envelope",
-                target_id=default_savings.id,
-                mode="percent",
-                percent=remainder_percent,
-                enabled=True,
-            )
-            valid_percent_rules.append(synthetic_rule)
-            total_percent = Decimal("100")
-
+    # Percent rules that add up to less than 100% split only that fraction of
+    # the remainder; the rest deliberately stays in cash for the user to spend
+    # or allocate manually. (It is not force-swept into savings — see
+    # test_income_distribution_percent_under_100_multi_rules.)
     if total_percent > Decimal("100"):
         expected_total = cash_remaining
         divisor = total_percent
