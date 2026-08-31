@@ -113,6 +113,59 @@ def test_apply_materializes_expense_envelopes_missing_from_e11_selection(databas
     asyncio.run(_run())
 
 
+def test_apply_does_not_duplicate_family_aid_envelope_across_name_variants(
+    database_url: str,
+) -> None:
+    """E11 sends "Famille — Aide"; the normalized fixed-expense feed references
+    "Aide famille". They are the same envelope - apply must not create both, and
+    the family distribution rule must still attach."""
+    answers = build_answers(include_explicit_envelope_answers=True, modernize=True)
+    answers["E6_support_family"] = "yes"
+    answers["E6a_support_family_amount"] = "400"
+    answers["E6b_support_family_cadence"] = "monthly"
+    answers["E11_selected_envelopes_v1"] = [
+        *answers["E11_selected_envelopes_v1"],
+        {
+            "name": "Famille — Aide",
+            "final_name": "Famille — Aide",
+            "group_key": "family",
+            "final_rollover_enabled": True,
+            "custom_category": None,
+            "custom_amount": None,
+        },
+    ]
+
+    async def _run() -> None:
+        sessionmaker = await _build_sessionmaker(database_url)
+        async with sessionmaker() as db:
+            user = await _create_user_with_defaults(db, "apply-family-variant@example.com")
+            await apply_onboarding_v2_payload(db, user, answers=answers, draft_objects={})
+            await db.flush()
+
+            from app.models import DistributionRule
+            from app.services.distribution_name_normalization import (
+                distribution_name_equivalent_key,
+            )
+
+            env_res = await db.execute(select(Envelope).where(Envelope.user_id == user.id))
+            family_envs = [
+                e
+                for e in env_res.scalars().all()
+                if distribution_name_equivalent_key(e.name) == "family_aid"
+            ]
+            assert len(family_envs) == 1, [e.name for e in family_envs]
+
+            rule_res = await db.execute(
+                select(DistributionRule).where(
+                    DistributionRule.user_id == user.id,
+                    DistributionRule.target_id == family_envs[0].id,
+                )
+            )
+            assert rule_res.scalar_one_or_none() is not None
+
+    asyncio.run(_run())
+
+
 def test_apply_onboarding_v2_payload_injects_no_starting_balance(database_url: str) -> None:
     """Onboarding never seeds a synthetic income - the first real income is
     declared manually by the user afterwards, and that is what seeds cash and

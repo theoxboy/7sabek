@@ -24,6 +24,7 @@ from app.services.onboarding_distribution_validation import (
 )
 from app.services.envelope_virtual import is_virtual_parent_envelope_name
 from app.services.envelope_rules import name_looks_like_debt, normalize_name
+from app.services.distribution_name_normalization import distribution_name_equivalent_key
 from app.services.onboarding_v2_canonical import (
     ExistingApplyState,
     compute_canonical_apply_state_backend,
@@ -157,13 +158,38 @@ async def _sync_distribution_rules_from_onboarding(
         "planned_future_obligation": 40,
         "scheduled": 70,
     }
+    _equiv_index: dict[str, Envelope] = {}
+    for _env in envelope_by_name.values():
+        _k = distribution_name_equivalent_key(_env.name)
+        if _k:
+            _equiv_index.setdefault(_k, _env)
+
+    def _match_envelope(name: str) -> Envelope | None:
+        direct = envelope_by_name.get(_name_key(name))
+        if direct is not None:
+            return direct
+        equiv = distribution_name_equivalent_key(name)
+        return _equiv_index.get(equiv) if equiv else None
+
     aggregated: dict[str, dict[str, Any]] = {}
     for item in canonical_state.cycle_normalized_expenses_v1:
         envelope_name = _safe_string(item.get("envelope"))
+        label = _safe_string(item.get("label"))
         per_cycle_amount = _safe_decimal(item.get("per_cycle_amount"))
         priority_layer = _safe_string(item.get("priority_layer")) or "scheduled"
         if not envelope_name or per_cycle_amount is None:
             continue
+        # The fixed-expense feed groups every transport cost under a single
+        # "Transport" name. When the user actually has leaf envelopes (Carburant,
+        # Assurance auto, ...) selected in E11, fund those instead of a domain
+        # envelope they never picked.
+        if (
+            label
+            and label != envelope_name
+            and _match_envelope(envelope_name) is None
+            and _match_envelope(label) is not None
+        ):
+            envelope_name = label
         bucket = aggregated.setdefault(
             envelope_name,
             {
@@ -243,7 +269,7 @@ async def _sync_distribution_rules_from_onboarding(
         aggregated.items(),
         key=lambda item: (int(item[1]["priority"]), item[0].casefold()),
     ):
-        envelope = envelope_by_name.get(_name_key(envelope_name))
+        envelope = _match_envelope(envelope_name)
         if envelope is None:
             continue
         amount = payload["amount"].quantize(Decimal("0.01"))
@@ -472,6 +498,9 @@ async def apply_onboarding_v2_payload(
     explicit_custom_category_pairs: list[tuple[str, str]] = []
     selected_envelopes_materialized: list[dict[str, Any]] = []
     selected_envelope_name_keys: set[str] = set()
+    # Cross-locale / cross-variant equivalence: "Famille — Aide" (E11) and
+    # "Aide famille" (normalized fixed expenses) are the same envelope.
+    selected_envelope_equiv_keys: set[str] = set()
     envelope_name_aliases: dict[str, str] = {
         "epargne": "Epargnes",
         "épargne": "Epargnes",
@@ -497,6 +526,9 @@ async def apply_onboarding_v2_payload(
             continue
 
         selected_envelope_name_keys.add(_name_key(final_name))
+        _equiv = distribution_name_equivalent_key(final_name)
+        if _equiv:
+            selected_envelope_equiv_keys.add(_equiv)
         summary["selected_envelopes_count"] += 1
         item_is_debt = (
             _safe_string(item.get("group_key")) == "debts"
@@ -559,6 +591,23 @@ async def apply_onboarding_v2_payload(
     # Safety net: materialize envelopes referenced by normalized fixed expenses
     # even when they were not explicitly selected in E11_selected_envelopes_v1.
     # This covers custom fixed "other" rows and family-support envelopes.
+    def _envelope_exists_by_any_name(name: str) -> bool:
+        if not name:
+            return False
+        if _name_key(name) in selected_envelope_name_keys:
+            return True
+        if envelope_by_name.get(_name_key(name)) is not None:
+            return True
+        equiv = distribution_name_equivalent_key(name)
+        if not equiv:
+            return False
+        if equiv in selected_envelope_equiv_keys:
+            return True
+        return any(
+            distribution_name_equivalent_key(env.name) == equiv
+            for env in envelope_by_name.values()
+        )
+
     for expense_item in canonical_state.cycle_normalized_expenses_v1:
         envelope_name = _safe_string(expense_item.get("envelope"))
         if not envelope_name:
@@ -567,9 +616,15 @@ async def apply_onboarding_v2_payload(
             continue
         if is_virtual_parent_envelope_name(envelope_name):
             continue
-        if _name_key(envelope_name) in selected_envelope_name_keys:
+        # A domain-aggregate name ("Transport") whose per-item leaf envelope
+        # ("Carburant", "Assurance auto", ...) already exists from E11 must not
+        # be materialized as an extra bucket.
+        expense_label = _safe_string(expense_item.get("envelope_label")) or _safe_string(
+            expense_item.get("label")
+        )
+        if expense_label and expense_label != envelope_name and _envelope_exists_by_any_name(expense_label):
             continue
-        if envelope_by_name.get(_name_key(envelope_name)) is not None:
+        if _envelope_exists_by_any_name(envelope_name):
             continue
 
         # Fixed-expense-derived envelopes should keep rollover enabled.
