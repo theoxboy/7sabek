@@ -57,6 +57,7 @@ from app.core.superadmin_session import (
 from app.db.session import get_db
 from app.models import (
     Envelope,
+    GuestEvent,
     GuestIdempotencyKey,
     OnboardingV2Record,
     PasswordResetToken,
@@ -982,6 +983,38 @@ async def _sweep_expired_idempotency_keys(db: AsyncSession) -> None:
     )
 
 
+async def _purge_stale_empty_guests(db: AsyncSession, *, older_than_days: int = 30) -> None:
+    """
+    Opportunistic cleanup: a guest older than 30 days that never logged a single
+    transaction is not a user, it's noise (the seeded envelopes are ours). A
+    guest who tracked anything is kept forever. Bounded per call so it never
+    blocks guest creation.
+    """
+    from app.models import Transaction
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    stale = await db.execute(
+        select(User.id)
+        .where(User.is_guest.is_(True), User.guest_created_at < cutoff)
+        .limit(20)
+    )
+    for (uid,) in stale.all():
+        has_tx = await db.scalar(
+            select(func.count()).select_from(Transaction).where(Transaction.user_id == uid)
+        )
+        if (has_tx or 0) > 0:
+            continue
+        target = await db.get(User, uid)
+        if target is not None:
+            await _purge_guest_owned_rows(db, uid)
+            await db.execute(
+                GuestIdempotencyKey.__table__.delete().where(
+                    GuestIdempotencyKey.user_id == uid
+                )
+            )
+            await db.delete(target)
+
+
 @router.post(
     "/guest",
     response_model=GuestCreateOut,
@@ -1048,6 +1081,19 @@ async def create_guest(
     db.add(user)
     await db.flush()
 
+    # A guest lands on a living budget, not an empty screen: seed the same
+    # non-deletable envelopes registration creates, plus five household starters.
+    db.add_all(
+        [
+            Envelope(user_id=user.id, name="Epargnes", is_default_savings=True, deletable=False, rollover_enabled=True),
+            Envelope(user_id=user.id, name="Cash", is_cash=True, deletable=False, rollover_enabled=False),
+        ]
+    )
+    db.add_all(
+        Envelope(user_id=user.id, name=name, rollover_enabled=True)
+        for name in ("Loyer", "Courses", "Transport", "Téléphone", "Divers")
+    )
+
     if idem_key:
         db.add(
             GuestIdempotencyKey(
@@ -1058,6 +1104,9 @@ async def create_guest(
                 expires_at=now + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
             )
         )
+
+    db.add(GuestEvent(user_id=user.id, name="guest_created"))
+    await _purge_stale_empty_guests(db)
 
     await db.commit()
     await db.refresh(user)
@@ -1135,6 +1184,13 @@ async def ack_guest_recovery_code(
         raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
     if user.recovery_code_ack_at is None:
         user.recovery_code_ack_at = datetime.now(timezone.utc)
+        db.add(
+            GuestEvent(
+                user_id=user.id,
+                name="protection_level_changed",
+                meta={"from": 40, "to": 70},
+            )
+        )
         await db.commit()
         await db.refresh(user)
     return _build_auth_out(user)
@@ -1169,13 +1225,62 @@ async def claim_guest_account(
     if clash.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail={"code": "email_taken"})
 
+    prev_level = guest_protection_level(user)
     user.email = normalized_email
     user.password_hash = hash_password(payload.password)
     user.is_guest = False
     user.claimed_at = datetime.now(timezone.utc)
+    db.add(
+        GuestEvent(
+            user_id=user.id,
+            name="claim_completed",
+            meta={"method": "email", "from_level": prev_level},
+        )
+    )
     await db.commit()
     await db.refresh(user)
 
+    await _issue_guest_session(db, request, response, user)
+    return _build_auth_out(user)
+
+
+@router.post("/guest/claim-passkey", response_model=AuthOut)
+async def claim_guest_with_passkey(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> AuthOut:
+    """
+    Finish a passkey-based claim: the guest just registered a passkey (via the
+    existing /auth/passkeys/register flow), now the row becomes a full account.
+    Email stays null — the passkey is the credential.
+    """
+    from app.models import UserPasskey
+
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+    passkey_count = await db.scalar(
+        select(func.count()).select_from(UserPasskey).where(
+            UserPasskey.user_id == user.id,
+            UserPasskey.revoked_at.is_(None),
+        )
+    )
+    if (passkey_count or 0) < 1:
+        raise HTTPException(status_code=400, detail={"code": "no_passkey"})
+
+    prev_level = guest_protection_level(user)
+    user.is_guest = False
+    user.claimed_at = datetime.now(timezone.utc)
+    db.add(
+        GuestEvent(
+            user_id=user.id,
+            name="claim_completed",
+            meta={"method": "passkey", "from_level": prev_level},
+        )
+    )
+    await db.commit()
+    await db.refresh(user)
     await _issue_guest_session(db, request, response, user)
     return _build_auth_out(user)
 

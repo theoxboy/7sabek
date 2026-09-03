@@ -53,9 +53,11 @@ from app.models.merchant_category_mappings import MerchantCategoryMapping
 from app.models.user_category_preferences import UserCategoryPreference
 from app.models.admin_notification import AdminNotification, AdminNotificationRead
 from app.models.guest_idempotency import GuestIdempotencyKey
+from app.models.guest_event import GuestEvent
 
 __all__ = [
     "GuestIdempotencyKey",
+    "GuestEvent",
     "Category",
     "CategoryEnvelopeMap",
     "AdminActivityLog",
