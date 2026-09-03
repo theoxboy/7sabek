@@ -246,6 +246,7 @@ def _build_auth_out(
         protection_level=guest_protection_level(user),
         claimed_at=getattr(user, "claimed_at", None),
         recovery_code_ack=bool(getattr(user, "recovery_code_ack_at", None)),
+        guest_created_at=getattr(user, "guest_created_at", None),
         currency=user.currency,
         sweep_interval_days=user.sweep_interval_days,
         first_name=user.first_name,
