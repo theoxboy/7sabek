@@ -92,6 +92,7 @@ from app.schemas.auth import (
     GuestClaimIn,
     GuestL2HintIn,
     GuestL2HintOut,
+    GuestSummaryOut,
     GuestRecoverIn,
     GuestResumeIn,
     GuestResumeOut,
@@ -1087,17 +1088,32 @@ async def create_guest(
     await db.flush()
 
     # A guest lands on a living budget, not an empty screen: seed the same
-    # non-deletable envelopes registration creates, plus five household starters.
+    # non-deletable envelopes registration creates, plus five household starters,
+    # each already wired to one catalogue category so "add an expense" works
+    # immediately without onboarding.
+    from app.models import Category, CategoryEnvelopeMap
+
     db.add_all(
         [
             Envelope(user_id=user.id, name="Epargnes", is_default_savings=True, deletable=False, rollover_enabled=True),
             Envelope(user_id=user.id, name="Cash", is_cash=True, deletable=False, rollover_enabled=False),
         ]
     )
-    db.add_all(
-        Envelope(user_id=user.id, name=name, rollover_enabled=True)
-        for name in ("Loyer", "Courses", "Transport", "Téléphone", "Divers")
+    _starters = (
+        ("Loyer", "rent"),
+        ("Courses", "groceries"),
+        ("Transport", "transport_generic"),
+        ("Téléphone", "phone"),
+        ("Divers", "miscellaneous"),
     )
+    for env_name, cat_key in _starters:
+        env = Envelope(id=uuid4(), user_id=user.id, name=env_name, rollover_enabled=True)
+        cat = Category(id=uuid4(), user_id=user.id, name=cat_key)
+        db.add(env)
+        db.add(cat)
+        db.add(
+            CategoryEnvelopeMap(user_id=user.id, category_id=cat.id, envelope_id=env.id)
+        )
 
     if idem_key:
         db.add(
@@ -1232,6 +1248,51 @@ async def recover_guest(
     db.add(GuestEvent(user_id=user.id, name="anchor_recovery_accepted"))
     await _issue_guest_session(db, request, response, user)
     return GuestResumeOut(user=_build_auth_out(user))
+
+
+@router.get("/guest/summary", response_model=GuestSummaryOut)
+async def guest_summary(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> GuestSummaryOut:
+    """The guest's own figures, for the conversion card ("X DH on Y days")."""
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+    from app.models import Transaction as _Txn
+
+    tx_count = int(
+        await db.scalar(
+            select(func.count()).select_from(_Txn).where(_Txn.user_id == user.id)
+        )
+        or 0
+    )
+    expense_total = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(_Txn.amount), 0)).where(
+                _Txn.user_id == user.id, _Txn.type == "expense"
+            )
+        )
+        or 0
+    )
+    env_count = int(
+        await db.scalar(
+            select(func.count()).select_from(Envelope).where(
+                Envelope.user_id == user.id, Envelope.deletable.is_(True)
+            )
+        )
+        or 0
+    )
+    days = 0
+    if user.guest_created_at:
+        days = max(
+            0, (datetime.now(timezone.utc) - user.guest_created_at).days
+        )
+    return GuestSummaryOut(
+        days_tracking=days,
+        transaction_count=tx_count,
+        expense_total=round(expense_total, 2),
+        envelope_count=env_count,
+    )
 
 
 @router.post("/guest/ack-recovery", response_model=AuthOut)

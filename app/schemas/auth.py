@@ -85,6 +85,13 @@ class GuestL2HintOut(BaseModel):
     maybe_exists: bool
 
 
+class GuestSummaryOut(BaseModel):
+    days_tracking: int
+    transaction_count: int
+    expense_total: float
+    envelope_count: int
+
+
 class GuestCreateOut(BaseModel):
     user: AuthOut
     guest_token: str
