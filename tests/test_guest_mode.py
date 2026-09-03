@@ -132,6 +132,25 @@ def test_guest_lands_on_a_populated_budget(client: TestClient) -> None:
         assert starter in names
 
 
+def test_guest_can_log_an_expense_out_of_the_box(client: TestClient) -> None:
+    _create_guest(client)
+    cats = {c["name"]: c["id"] for c in client.get("/categories").json()}
+    assert "groceries" in cats  # seeded + mapped to "Courses"
+    tx = client.post(
+        "/transactions",
+        json={
+            "category_id": cats["groceries"],
+            "type": "expense",
+            "amount": 320,
+            "occurred_on": "2026-09-03",
+        },
+    )
+    assert tx.status_code == 201, tx.text
+    s = client.get("/auth/guest/summary").json()
+    assert s["transaction_count"] == 1
+    assert s["expense_total"] == 320.0
+
+
 def test_ack_recovery_moves_protection_40_to_70(client: TestClient) -> None:
     body = _create_guest(client)
     assert body["user"]["protection_level"] == 40
@@ -155,6 +174,23 @@ def test_claimed_guest_carries_claimed_at(client: TestClient) -> None:
     assert res.status_code == 200
     assert res.json()["claimed_at"] is not None
     assert res.json()["protection_level"] == 100
+
+
+def test_guest_summary_reports_the_guests_own_figures(client: TestClient) -> None:
+    _create_guest(client)
+    client.post("/envelopes", json={"name": "Extra", "rollover_enabled": True})
+    s = client.get("/auth/guest/summary")
+    assert s.status_code == 200, s.text
+    d = s.json()
+    assert d["envelope_count"] >= 1
+    assert d["transaction_count"] == 0
+    assert d["days_tracking"] >= 0
+    assert isinstance(d["expense_total"], (int, float))
+
+    # a member cannot read the guest summary
+    client.cookies.clear()
+    register_user(client, "notguest-summary@example.com")
+    assert client.get("/auth/guest/summary").status_code == 409
 
 
 def test_member_is_unaffected(client: TestClient) -> None:
