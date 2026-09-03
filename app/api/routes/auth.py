@@ -34,6 +34,7 @@ from app.core.rate_limit import (
     get_client_ip,
 )
 from app.core.password_policy import validate_password_easy
+from app.core.device_signature import anchor_hash as _anchor_hash, confidence_of
 from app.core.guest import (
     IDEMPOTENCY_TTL_HOURS,
     generate_guest_token,
@@ -56,6 +57,7 @@ from app.core.superadmin_session import (
 )
 from app.db.session import get_db
 from app.models import (
+    DeviceAnchor,
     Envelope,
     GuestEvent,
     GuestIdempotencyKey,
@@ -88,6 +90,8 @@ from app.schemas.auth import (
     GuestCreateIn,
     GuestCreateOut,
     GuestClaimIn,
+    GuestL2HintIn,
+    GuestL2HintOut,
     GuestRecoverIn,
     GuestResumeIn,
     GuestResumeOut,
@@ -1107,6 +1111,22 @@ async def create_guest(
         )
 
     db.add(GuestEvent(user_id=user.id, name="guest_created"))
+
+    if payload.signals:
+        from app.core.device_signature import normalise_signals
+
+        clean = normalise_signals(payload.signals)
+        ah = _anchor_hash(clean, ip=get_client_ip(request))
+        if ah:
+            db.add(
+                DeviceAnchor(
+                    user_id=user.id,
+                    anchor_hash=ah,
+                    signals=clean,
+                    confidence=confidence_of(clean),
+                )
+            )
+
     await _purge_stale_empty_guests(db)
 
     await db.commit()
@@ -1151,6 +1171,44 @@ async def resume_guest(
     )
 
 
+@router.post("/guest/l2-hint", response_model=GuestL2HintOut)
+async def guest_l2_hint(
+    payload: GuestL2HintIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> GuestL2HintOut:
+    """
+    L2, and only L2: given this device's stable signals, might a guest budget
+    live here? Answers a bare boolean — no id, no data. A `true` routes the
+    person to the recovery-code flow; it never restores anything on its own.
+    """
+    await enforce_rate_limit(db, request, "guest_l2_hint", 10, 3600)
+    from app.core.device_signature import normalise_signals
+
+    clean = normalise_signals(payload.signals)
+    ah = _anchor_hash(clean, ip=get_client_ip(request))
+    if not ah:
+        return GuestL2HintOut(maybe_exists=False)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+    match = await db.execute(
+        select(DeviceAnchor.id)
+        .join(User, User.id == DeviceAnchor.user_id)
+        .where(
+            DeviceAnchor.anchor_hash == ah,
+            DeviceAnchor.first_seen >= cutoff,
+            User.is_guest.is_(True),
+            User.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    found = match.scalar_one_or_none() is not None
+    if found:
+        db.add(GuestEvent(name="anchor_recovery_offered"))
+        await db.commit()
+    return GuestL2HintOut(maybe_exists=found)
+
+
 @router.post("/guest/recover", response_model=GuestResumeOut)
 async def recover_guest(
     payload: GuestRecoverIn,
@@ -1171,6 +1229,7 @@ async def recover_guest(
         raise HTTPException(status_code=404, detail={"code": "guest_not_found"})
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "already_claimed"})
+    db.add(GuestEvent(user_id=user.id, name="anchor_recovery_accepted"))
     await _issue_guest_session(db, request, response, user)
     return GuestResumeOut(user=_build_auth_out(user))
 

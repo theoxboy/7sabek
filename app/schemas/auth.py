@@ -72,6 +72,17 @@ class AuthOut(BaseModel):
 class GuestCreateIn(BaseModel):
     locale: Optional[str] = Field(default="fr", max_length=10)
     currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    # L2 device hint — stable signals only (no canvas/webgl). Optional.
+    signals: Optional[dict[str, Any]] = None
+
+
+class GuestL2HintIn(BaseModel):
+    signals: dict[str, Any]
+
+
+class GuestL2HintOut(BaseModel):
+    # A boolean and nothing else — no user id, no amounts, no counts.
+    maybe_exists: bool
 
 
 class GuestCreateOut(BaseModel):
