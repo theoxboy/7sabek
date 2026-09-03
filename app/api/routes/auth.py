@@ -92,6 +92,8 @@ from app.schemas.auth import (
     GuestClaimIn,
     GuestL2HintIn,
     GuestL2HintOut,
+    GuestMergeIn,
+    GuestMergeOut,
     GuestSummaryOut,
     GuestRecoverIn,
     GuestResumeIn,
@@ -1363,6 +1365,69 @@ async def claim_guest_account(
 
     await _issue_guest_session(db, request, response, user)
     return _build_auth_out(user)
+
+
+@router.post("/guest/merge", response_model=GuestMergeOut)
+async def merge_guest_account(
+    payload: GuestMergeIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> GuestMergeOut:
+    """
+    Sign in to an existing account and bring the guest's tracked expenses with it.
+    The guest's expenses are replayed onto the target account (same tested
+    transaction path), then the guest row is hard-deleted.
+    """
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+
+    await enforce_rate_limit(db, request, "guest_merge", 5, 3600)
+    normalized_email = _normalize_email(str(payload.email))
+    target = (
+        await db.execute(select(User).where(func.lower(User.email) == normalized_email))
+    ).scalar_one_or_none()
+    if (
+        target is None
+        or target.id == user.id
+        or target.is_guest
+        or target.deleted_at is not None
+        or not target.password_hash
+        or not verify_password(payload.password, target.password_hash)
+    ):
+        raise HTTPException(status_code=401, detail={"code": "bad_credentials"})
+    if target.status != "active":
+        raise HTTPException(status_code=403, detail={"code": "target_not_active"})
+
+    from app.services.guest_merge import merge_guest_into_account
+
+    result = await merge_guest_into_account(db, user, target)
+
+    guest_id = user.id
+    await _end_superadmin_session_from_request(request, db)
+    db.add(
+        GuestEvent(
+            user_id=target.id,
+            name="claim_completed",
+            meta={"method": "merge", "transactions_merged": result["transactions_merged"]},
+        )
+    )
+    await _purge_guest_owned_rows(db, guest_id)
+    await db.execute(
+        GuestIdempotencyKey.__table__.delete().where(
+            GuestIdempotencyKey.user_id == guest_id
+        )
+    )
+    await db.delete(user)
+    await db.commit()
+    await db.refresh(target)
+
+    await _issue_guest_session(db, request, response, target)
+    return GuestMergeOut(
+        user=_build_auth_out(target),
+        transactions_merged=result["transactions_merged"],
+    )
 
 
 @router.post("/guest/claim-passkey", response_model=AuthOut)
