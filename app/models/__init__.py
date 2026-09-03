@@ -54,10 +54,12 @@ from app.models.user_category_preferences import UserCategoryPreference
 from app.models.admin_notification import AdminNotification, AdminNotificationRead
 from app.models.guest_idempotency import GuestIdempotencyKey
 from app.models.guest_event import GuestEvent
+from app.models.device_anchor import DeviceAnchor
 
 __all__ = [
     "GuestIdempotencyKey",
     "GuestEvent",
+    "DeviceAnchor",
     "Category",
     "CategoryEnvelopeMap",
     "AdminActivityLog",
