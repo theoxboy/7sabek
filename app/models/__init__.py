@@ -52,8 +52,10 @@ from app.models.debt import Debt
 from app.models.merchant_category_mappings import MerchantCategoryMapping
 from app.models.user_category_preferences import UserCategoryPreference
 from app.models.admin_notification import AdminNotification, AdminNotificationRead
+from app.models.guest_idempotency import GuestIdempotencyKey
 
 __all__ = [
+    "GuestIdempotencyKey",
     "Category",
     "CategoryEnvelopeMap",
     "AdminActivityLog",

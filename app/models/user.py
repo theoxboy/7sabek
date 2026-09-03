@@ -28,9 +28,25 @@ class User(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     password_hash: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
+    )
+    # "Mode Découverte" guest: a real row with no email/password/onboarding.
+    # Claiming an account is an UPDATE of this same row — id never changes.
+    is_guest: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    guest_token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    guest_created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    recovery_code_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    recovery_code_ack_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     sweep_interval_days: Mapped[int] = mapped_column(Integer, nullable=False)

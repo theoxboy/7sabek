@@ -41,13 +41,15 @@ class LoginIn(BaseModel):
 
 class AuthOut(BaseModel):
     id: str
-    email: EmailStr
+    email: Optional[EmailStr] = None
     role: str
     status: str
     must_reset_password: bool
     is_beta_tester: bool
     force_onboarding_v2_review: bool
     force_tour_replay_version: int = 0
+    is_guest: bool = False
+    protection_level: Optional[int] = None
     currency: str
     sweep_interval_days: int
     first_name: Optional[str] = None
@@ -62,6 +64,34 @@ class AuthOut(BaseModel):
     refresh_token: Optional[str] = None
     session_token: Optional[str] = None
     token_type: Optional[str] = "bearer"
+
+
+class GuestCreateIn(BaseModel):
+    locale: Optional[str] = Field(default="fr", max_length=10)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+
+
+class GuestCreateOut(BaseModel):
+    user: AuthOut
+    guest_token: str
+    recovery_code: Optional[str] = None
+
+
+class GuestResumeIn(BaseModel):
+    token: str = Field(min_length=8, max_length=256)
+
+
+class GuestRecoverIn(BaseModel):
+    recovery_code: str = Field(min_length=4, max_length=32)
+
+
+class GuestResumeOut(BaseModel):
+    user: AuthOut
+
+
+class GuestClaimIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
 
 
 class WebLoginTokenOut(BaseModel):
