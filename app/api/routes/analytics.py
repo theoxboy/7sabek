@@ -20,6 +20,8 @@ from app.models import (
 )
 from app.schemas.analytics import (
     ChurnBucketOut,
+    GuestFunnelDailyPoint,
+    GuestFunnelOut,
     MonthlyFinancePoint,
     OnboardingActivationOut,
     PageViewIn,
@@ -85,6 +87,92 @@ async def create_guest_event(
     db.add(GuestEvent(user_id=current_user.id, name=name, meta=meta))
     await db.commit()
     return {"ok": True}
+
+
+@router.get("/guest-funnel", response_model=GuestFunnelOut)
+async def guest_funnel(
+    days: int = Query(30, ge=1, le=180),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> GuestFunnelOut:
+    if current_user.role != "superadmin":
+        raise HTTPException(status_code=403, detail="FORBIDDEN")
+
+    from app.models import GuestEvent
+
+    today = date.today()
+    start_date = today - timedelta(days=days - 1)
+    start_dt = datetime.combine(start_date, time.min)
+
+    async def _count(name: str) -> int:
+        return int(
+            await db.scalar(
+                select(func.count()).select_from(GuestEvent).where(
+                    GuestEvent.name == name, GuestEvent.created_at >= start_dt
+                )
+            )
+            or 0
+        )
+
+    created = await _count("guest_created")
+    first_tx = await _count("guest_first_tx")
+    claimed = await _count("claim_completed")
+    protection_70 = await _count("protection_level_changed")
+    recovery_offered = await _count("anchor_recovery_offered")
+
+    passkey = int(
+        await db.scalar(
+            select(func.count()).select_from(GuestEvent).where(
+                GuestEvent.name == "claim_completed",
+                GuestEvent.created_at >= start_dt,
+                GuestEvent.meta["method"].astext == "passkey",
+            )
+        )
+        or 0
+    )
+
+    active_now = int(
+        await db.scalar(
+            select(func.count()).select_from(User).where(
+                User.is_guest.is_(True), User.deleted_at.is_(None)
+            )
+        )
+        or 0
+    )
+
+    rows = await db.execute(
+        select(
+            func.date(GuestEvent.created_at),
+            func.count().filter(GuestEvent.name == "guest_created"),
+            func.count().filter(GuestEvent.name == "claim_completed"),
+        )
+        .where(
+            GuestEvent.created_at >= start_dt,
+            GuestEvent.name.in_(["guest_created", "claim_completed"]),
+        )
+        .group_by(func.date(GuestEvent.created_at))
+        .order_by(func.date(GuestEvent.created_at))
+    )
+    daily = [
+        GuestFunnelDailyPoint(day=str(d), created=int(c or 0), claimed=int(cl or 0))
+        for d, c, cl in rows.all()
+    ]
+
+    return GuestFunnelOut(
+        window_days=days,
+        guests_created=created,
+        guests_first_tx=first_tx,
+        guests_claimed=claimed,
+        guests_active_now=active_now,
+        protection_70=protection_70,
+        claim_by_passkey=passkey,
+        claim_by_email=max(0, claimed - passkey),
+        activation_rate=round(first_tx / created, 4) if created else 0.0,
+        claim_rate=round(claimed / created, 4) if created else 0.0,
+        anchor_recovery_offered=recovery_offered,
+        silent_loss_rate=round(recovery_offered / created, 4) if created else 0.0,
+        daily=daily,
+    )
 
 
 @router.get("/traffic", response_model=TrafficSummaryOut)
