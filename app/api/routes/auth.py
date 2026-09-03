@@ -243,6 +243,8 @@ def _build_auth_out(
         force_tour_replay_version=user.force_tour_replay_version,
         is_guest=bool(getattr(user, "is_guest", False)),
         protection_level=guest_protection_level(user),
+        claimed_at=getattr(user, "claimed_at", None),
+        recovery_code_ack=bool(getattr(user, "recovery_code_ack_at", None)),
         currency=user.currency,
         sweep_interval_days=user.sweep_interval_days,
         first_name=user.first_name,
@@ -1121,6 +1123,21 @@ async def recover_guest(
         raise HTTPException(status_code=409, detail={"code": "already_claimed"})
     await _issue_guest_session(db, request, response, user)
     return GuestResumeOut(user=_build_auth_out(user))
+
+
+@router.post("/guest/ack-recovery", response_model=AuthOut)
+async def ack_guest_recovery_code(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> AuthOut:
+    """The guest confirms they saved their recovery code — protection level 40 → 70."""
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+    if user.recovery_code_ack_at is None:
+        user.recovery_code_ack_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(user)
+    return _build_auth_out(user)
 
 
 @router.post("/guest/claim", response_model=AuthOut)

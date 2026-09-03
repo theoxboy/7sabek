@@ -124,6 +124,31 @@ def test_envelope_quota_caps_a_guest_at_20(client: TestClient) -> None:
     assert over.json()["detail"]["code"] == "guest_quota"
 
 
+def test_ack_recovery_moves_protection_40_to_70(client: TestClient) -> None:
+    body = _create_guest(client)
+    assert body["user"]["protection_level"] == 40
+    assert body["user"]["recovery_code_ack"] is False
+
+    res = client.post("/auth/guest/ack-recovery")
+    assert res.status_code == 200, res.text
+    assert res.json()["protection_level"] == 70
+    assert res.json()["recovery_code_ack"] is True
+
+    # idempotent
+    assert client.post("/auth/guest/ack-recovery").json()["protection_level"] == 70
+
+
+def test_claimed_guest_carries_claimed_at(client: TestClient) -> None:
+    _create_guest(client)
+    res = client.post(
+        "/auth/guest/claim",
+        json={"email": "claimedat@example.com", "password": DEFAULT_PASSWORD},
+    )
+    assert res.status_code == 200
+    assert res.json()["claimed_at"] is not None
+    assert res.json()["protection_level"] == 100
+
+
 def test_member_is_unaffected(client: TestClient) -> None:
     register_user(client, "member@example.com")
     me = client.get("/auth/me")
