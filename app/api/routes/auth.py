@@ -5,7 +5,7 @@ from hashlib import sha256
 import logging
 import secrets
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
@@ -34,6 +34,14 @@ from app.core.rate_limit import (
     get_client_ip,
 )
 from app.core.password_policy import validate_password_easy
+from app.core.guest import (
+    IDEMPOTENCY_TTL_HOURS,
+    generate_guest_token,
+    generate_recovery_code,
+    hash_secret,
+    normalize_recovery_code,
+    protection_level as guest_protection_level,
+)
 from app.core.security import create_token, decode_token, hash_password, verify_password
 from app.core.superadmin_session import (
     SUPERADMIN_SESSION_COOKIE,
@@ -49,6 +57,7 @@ from app.core.superadmin_session import (
 from app.db.session import get_db
 from app.models import (
     Envelope,
+    GuestIdempotencyKey,
     OnboardingV2Record,
     PasswordResetToken,
     SuperadminSession,
@@ -75,6 +84,12 @@ from app.services.gamification import to_local_date
 from app.services.recaptcha import verify_recaptcha_token
 from app.schemas.auth import (
     AuthOut,
+    GuestCreateIn,
+    GuestCreateOut,
+    GuestClaimIn,
+    GuestRecoverIn,
+    GuestResumeIn,
+    GuestResumeOut,
     ForcePasswordResetIn,
     PasswordResetConfirmIn,
     PasswordResetTokenInfoIn,
@@ -226,6 +241,8 @@ def _build_auth_out(
         is_beta_tester=user.is_beta_tester,
         force_onboarding_v2_review=user.force_onboarding_v2_review,
         force_tour_replay_version=user.force_tour_replay_version,
+        is_guest=bool(getattr(user, "is_guest", False)),
+        protection_level=guest_protection_level(user),
         currency=user.currency,
         sweep_interval_days=user.sweep_interval_days,
         first_name=user.first_name,
@@ -929,6 +946,284 @@ async def login(
         refresh_token=refresh_token,
         session_token=session_token,
     )
+
+
+async def _issue_guest_session(
+    db: AsyncSession,
+    request: Request,
+    response: Response,
+    user: User,
+) -> None:
+    """Give a guest the same cookie triplet a normal login gets."""
+    session_token = await _create_or_reuse_account_session(
+        db,
+        request,
+        user,
+        geo_lat=None,
+        geo_lng=None,
+        geo_accuracy_m=None,
+        geo_label=None,
+        browser=None,
+        os=None,
+        device=None,
+    )
+    _set_auth_cookies(response, str(user.id))
+    _set_superadmin_session_cookie(response, session_token)
+
+
+async def _sweep_expired_idempotency_keys(db: AsyncSession) -> None:
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        GuestIdempotencyKey.__table__.delete().where(
+            GuestIdempotencyKey.expires_at < now
+        )
+    )
+
+
+@router.post(
+    "/guest",
+    response_model=GuestCreateOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_guest(
+    request: Request,
+    response: Response,
+    payload: Optional[GuestCreateIn] = None,
+    db: AsyncSession = Depends(get_db),
+) -> GuestCreateOut:
+    """
+    Create a "Mode Découverte" guest and open a session.
+
+    Idempotent: retrying with the same ``Idempotency-Key`` header returns the same
+    guest, never a second one.
+    """
+    payload = payload or GuestCreateIn()
+    platform_settings = await get_platform_settings(db)
+    if platform_settings.maintenance_mode:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=build_maintenance_message(platform_settings.maintenance_message),
+        )
+    await enforce_rate_limit(db, request, "guest_create", 5, 3600)
+
+    idem_key = (request.headers.get("Idempotency-Key") or "").strip()[:128]
+    if idem_key:
+        await _sweep_expired_idempotency_keys(db)
+        existing = await db.get(GuestIdempotencyKey, idem_key)
+        if existing is not None:
+            replay = await db.get(User, existing.user_id)
+            if replay is not None and replay.is_guest:
+                await _issue_guest_session(db, request, response, replay)
+                return GuestCreateOut(
+                    user=_build_auth_out(replay),
+                    guest_token=existing.guest_token,
+                    recovery_code=existing.recovery_code,
+                )
+
+    now = datetime.now(timezone.utc)
+    token = generate_guest_token()
+    recovery_code = generate_recovery_code()
+    interval = platform_settings.default_sweep_interval_days or 30
+    currency = (payload.currency or platform_settings.default_currency or "MAD").upper()[:3]
+
+    guest_id = uuid4()
+    user = User(
+        id=guest_id,
+        # Internal placeholder so schemas that assume a string email keep working.
+        # Not user PII; replaced with the real address on claim.
+        email=f"guest.{guest_id}@guests.7sabek.ma",
+        password_hash=None,
+        is_guest=True,
+        guest_created_at=now,
+        guest_token_hash=hash_secret(token),
+        recovery_code_hash=hash_secret(recovery_code),
+        currency=currency,
+        sweep_interval_days=interval,
+        next_sweep_date=date.today() + timedelta(days=interval),
+        role="user",
+        status="active",
+    )
+    db.add(user)
+    await db.flush()
+
+    if idem_key:
+        db.add(
+            GuestIdempotencyKey(
+                key=idem_key,
+                user_id=user.id,
+                guest_token=token,
+                recovery_code=recovery_code,
+                expires_at=now + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
+            )
+        )
+
+    await db.commit()
+    await db.refresh(user)
+    await _issue_guest_session(db, request, response, user)
+    return GuestCreateOut(
+        user=_build_auth_out(user),
+        guest_token=token,
+        recovery_code=recovery_code,
+    )
+
+
+async def _resume_guest_by_hash(
+    db: AsyncSession,
+    request: Request,
+    response: Response,
+    token_hash: str,
+) -> GuestResumeOut:
+    result = await db.execute(
+        select(User).where(User.guest_token_hash == token_hash)
+    )
+    user = result.scalar_one_or_none()
+    if user is None or user.deleted_at is not None:
+        raise HTTPException(status_code=404, detail={"code": "guest_not_found"})
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "already_claimed"})
+    await _issue_guest_session(db, request, response, user)
+    return GuestResumeOut(user=_build_auth_out(user))
+
+
+@router.post("/guest/resume", response_model=GuestResumeOut)
+async def resume_guest(
+    payload: GuestResumeIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> GuestResumeOut:
+    """Exchange a mirror token for a fresh session cookie (the cookie was lost)."""
+    await enforce_rate_limit(db, request, "guest_resume", 5, 60)
+    return await _resume_guest_by_hash(
+        db, request, response, hash_secret(payload.token.strip())
+    )
+
+
+@router.post("/guest/recover", response_model=GuestResumeOut)
+async def recover_guest(
+    payload: GuestRecoverIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> GuestResumeOut:
+    """Exchange a recovery code for a session (phase 3 surfaces the UI for this)."""
+    await enforce_rate_limit(db, request, "guest_recover", 5, 3600)
+    normalized = normalize_recovery_code(payload.recovery_code)
+    if len(normalized) < 4:
+        raise HTTPException(status_code=404, detail={"code": "guest_not_found"})
+    result = await db.execute(
+        select(User).where(User.recovery_code_hash == hash_secret(normalized))
+    )
+    user = result.scalar_one_or_none()
+    if user is None or user.deleted_at is not None:
+        raise HTTPException(status_code=404, detail={"code": "guest_not_found"})
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "already_claimed"})
+    await _issue_guest_session(db, request, response, user)
+    return GuestResumeOut(user=_build_auth_out(user))
+
+
+@router.post("/guest/claim", response_model=AuthOut)
+async def claim_guest_account(
+    payload: GuestClaimIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> AuthOut:
+    """
+    Turn the current guest into a full account. A single UPDATE on the same row —
+    no data is moved, the user id never changes.
+    """
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+
+    platform_settings = await get_platform_settings(db)
+    password_error = validate_password_easy(
+        payload.password, max(platform_settings.password_min_length, 8)
+    )
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
+
+    normalized_email = _normalize_email(str(payload.email))
+    clash = await db.execute(
+        select(User).where(func.lower(User.email) == normalized_email, User.id != user.id)
+    )
+    if clash.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail={"code": "email_taken"})
+
+    user.email = normalized_email
+    user.password_hash = hash_password(payload.password)
+    user.is_guest = False
+    user.claimed_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(user)
+
+    await _issue_guest_session(db, request, response, user)
+    return _build_auth_out(user)
+
+
+async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
+    """
+    Hard-delete a guest's data. Most user-referencing tables already have
+    ON DELETE CASCADE; these are the ones that don't and that a guest can fill.
+    Ordered children-first so no FK is violated.
+    """
+    from sqlalchemy import delete as _delete
+    from app.models import (
+        Category,
+        CategoryEnvelopeMap,
+        Envelope,
+        EnvelopeAdjustmentLog,
+        EnvelopeAllocation,
+        EnvelopeMovement,
+        EnvelopePeriod,
+        EnvelopeTransferLog,
+        Goal,
+        PageView,
+        Sweep,
+        Transaction,
+    )
+
+    for model in (
+        EnvelopeMovement,
+        EnvelopeAllocation,
+        EnvelopePeriod,
+        EnvelopeTransferLog,
+        EnvelopeAdjustmentLog,
+        CategoryEnvelopeMap,
+        Transaction,
+        Sweep,
+        Goal,
+        PageView,
+        Category,
+        Envelope,
+    ):
+        await db.execute(_delete(model).where(model.user_id == user_id))
+
+
+@router.delete("/guest", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_guest_data(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Erase the guest and all their data, immediately, no grace period."""
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+    user_id = user.id
+    await _end_superadmin_session_from_request(request, db)
+    await _purge_guest_owned_rows(db, user_id)
+    await db.execute(
+        GuestIdempotencyKey.__table__.delete().where(
+            GuestIdempotencyKey.user_id == user_id
+        )
+    )
+    await db.delete(user)
+    await db.commit()
+    _clear_auth_cookies(response)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/refresh", response_model=AuthOut)

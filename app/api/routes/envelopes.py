@@ -5,7 +5,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -132,6 +132,24 @@ async def create_envelope(
         raise HTTPException(status_code=400, detail="ENVELOPE_NAME_REQUIRED")
     if is_reserved_envelope_name(normalized_name):
         raise HTTPException(status_code=400, detail="ENVELOPE_NAME_RESERVED")
+
+    if current_user.is_guest:
+        from app.core.guest import GUEST_MAX_ENVELOPES
+
+        existing_count = await db.scalar(
+            select(func.count())
+            .select_from(Envelope)
+            .where(Envelope.user_id == current_user.id)
+        )
+        if (existing_count or 0) >= GUEST_MAX_ENVELOPES:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "guest_quota",
+                    "resource": "envelopes",
+                    "limit": GUEST_MAX_ENVELOPES,
+                },
+            )
     if (
         await _find_envelope_name_conflict(db, current_user.id, normalized_name)
     ) is not None:
