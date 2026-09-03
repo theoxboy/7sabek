@@ -65,7 +65,7 @@ def test_claim_is_an_update_no_data_moves(client: TestClient) -> None:
     body = _create_guest(client)
     guest_id = body["user"]["id"]
 
-    env = client.post("/envelopes", json={"name": "Courses", "rollover_enabled": True})
+    env = client.post("/envelopes", json={"name": "Vacances été", "rollover_enabled": True})
     assert env.status_code == 201, env.text
     envelope_id = env.json()["id"]
 
@@ -116,12 +116,20 @@ def test_delete_guest_erases_everything(client: TestClient) -> None:
 
 def test_envelope_quota_caps_a_guest_at_20(client: TestClient) -> None:
     _create_guest(client)
-    for i in range(20):
+    existing = len(client.get("/envelopes").json())  # seeded starters
+    for i in range(20 - existing):
         r = client.post("/envelopes", json={"name": f"Enveloppe {i}", "rollover_enabled": True})
         assert r.status_code == 201, (i, r.text)
-    over = client.post("/envelopes", json={"name": "Enveloppe 21", "rollover_enabled": True})
+    over = client.post("/envelopes", json={"name": "Une de trop", "rollover_enabled": True})
     assert over.status_code == 403
     assert over.json()["detail"]["code"] == "guest_quota"
+
+
+def test_guest_lands_on_a_populated_budget(client: TestClient) -> None:
+    _create_guest(client)
+    names = {e["name"].lower() for e in client.get("/envelopes").json()}
+    for starter in ("loyer", "courses", "transport"):
+        assert starter in names
 
 
 def test_ack_recovery_moves_protection_40_to_70(client: TestClient) -> None:

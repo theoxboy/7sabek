@@ -52,6 +52,7 @@ class AuthOut(BaseModel):
     protection_level: Optional[int] = None
     claimed_at: Optional[datetime] = None
     recovery_code_ack: bool = False
+    guest_created_at: Optional[datetime] = None
     currency: str
     sweep_interval_days: int
     first_name: Optional[str] = None

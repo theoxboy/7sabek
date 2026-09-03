@@ -54,6 +54,39 @@ async def create_page_view(
     return {"ok": True}
 
 
+_GUEST_EVENT_NAMES = {
+    "guest_first_tx",
+    "guest_first_envelope",
+    "anchor_recovery_offered",
+    "anchor_recovery_accepted",
+    "protection_level_changed",
+    "claim_prompt_shown",
+    "claim_prompt_dismissed",
+    "fragile_context_detected",
+}
+
+
+@router.post("/guest-event", status_code=status.HTTP_201_CREATED)
+async def create_guest_event(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Record one Mode Découverte funnel event. Client-fired; server ignores
+    unknown names so a stale client can't pollute the table."""
+    from app.models import GuestEvent
+
+    name = str(payload.get("name") or "").strip()[:48]
+    if name not in _GUEST_EVENT_NAMES:
+        return {"ok": False, "ignored": name}
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        meta = None
+    db.add(GuestEvent(user_id=current_user.id, name=name, meta=meta))
+    await db.commit()
+    return {"ok": True}
+
+
 @router.get("/traffic", response_model=TrafficSummaryOut)
 async def traffic_summary(
     days: int = Query(7, ge=1, le=90),

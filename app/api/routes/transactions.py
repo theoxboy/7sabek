@@ -67,6 +67,16 @@ async def create_transaction(
     if category is None:
         raise HTTPException(status_code=404, detail="Category not found")
 
+    if current_user.is_guest:
+        from sqlalchemy import func as _func
+        from app.models import GuestEvent, Transaction as _Txn
+
+        prior = await db.scalar(
+            select(_func.count()).select_from(_Txn).where(_Txn.user_id == current_user.id)
+        )
+        if (prior or 0) == 0:
+            db.add(GuestEvent(user_id=current_user.id, name="guest_first_tx"))
+
     transaction_type = TransactionType(payload.type)
     transaction = await create_transaction_with_effects(
         db,

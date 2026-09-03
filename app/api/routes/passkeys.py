@@ -81,7 +81,17 @@ def _ensure_enabled() -> None:
 
 
 def _is_user_allowed_for_passkeys(user: Optional[User]) -> bool:
+    # A guest claiming an account with a passkey has only a placeholder email;
+    # gate them on the feature flag itself, not the allow-list.
+    if user is not None and getattr(user, "is_guest", False):
+        return get_settings().enable_passkeys
     return is_passkeys_enabled_for_email(user.email if user is not None else None)
+
+
+def _passkey_user_name(user: User) -> str:
+    if getattr(user, "is_guest", False):
+        return "invite@7sabek.ma"
+    return user.email or "user@7sabek.ma"
 
 
 def _ensure_user_allowed(user: User) -> None:
@@ -265,8 +275,8 @@ async def passkey_register_options(
                 rp_id=get_settings().passkey_rp_id,
                 rp_name=get_settings().passkey_rp_name,
                 user_id=str(user.id).encode("utf-8"),
-                user_name=user.email,
-                user_display_name=user.email,
+                user_name=_passkey_user_name(user),
+                user_display_name=_passkey_user_name(user),
                 exclude_credentials=exclude,
                 authenticator_selection=authenticator_selection,
                 attestation=AttestationConveyancePreference.NONE,
@@ -276,8 +286,8 @@ async def passkey_register_options(
                 rp_id=get_settings().passkey_rp_id,
                 rp_name=get_settings().passkey_rp_name,
                 user_id=str(user.id).encode("utf-8"),
-                user_name=user.email,
-                user_display_name=user.email,
+                user_name=_passkey_user_name(user),
+                user_display_name=_passkey_user_name(user),
                 exclude_credentials=exclude,
                 authenticator_selection=authenticator_selection,
             )
