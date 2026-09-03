@@ -115,6 +115,16 @@ class GuestClaimIn(BaseModel):
     password: str = Field(min_length=8)
 
 
+class GuestMergeIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1)
+
+
+class GuestMergeOut(BaseModel):
+    user: AuthOut
+    transactions_merged: int
+
+
 class WebLoginTokenOut(BaseModel):
     token: str
     expires_at: datetime
