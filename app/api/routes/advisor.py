@@ -525,6 +525,31 @@ async def advisor_chat(
     current_user: User = Depends(get_current_user),
 ) -> AdvisorChatResponseOut:
     """Send a conversation to the AI advisor enriched with the user's real financial data."""
+    if current_user.is_guest:
+        from app.core.guest import GUEST_ADVISOR_MESSAGES_PER_DAY
+        from sqlalchemy import func as _func
+
+        day_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        used_today = await db.scalar(
+            select(_func.count())
+            .select_from(AdvisorChatMessage)
+            .where(
+                AdvisorChatMessage.user_id == current_user.id,
+                AdvisorChatMessage.role == "user",
+                AdvisorChatMessage.created_at >= day_start,
+            )
+        )
+        if (used_today or 0) >= GUEST_ADVISOR_MESSAGES_PER_DAY:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "guest_advisor_daily_limit",
+                    "limit": GUEST_ADVISOR_MESSAGES_PER_DAY,
+                },
+            )
+
     # Gather user financial context
     user_context = await _collect_user_context(db, current_user)
 

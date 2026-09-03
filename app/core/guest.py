@@ -14,7 +14,8 @@ import secrets
 
 # Quotas — mirrored on the client (src/lib/guestQuota.ts). Backend is the authority.
 GUEST_MAX_ENVELOPES = 20
-GUEST_MAX_ADVISOR_EXCHANGES = 3
+# Messages a guest may send to the AI advisor per calendar day (UTC).
+GUEST_ADVISOR_MESSAGES_PER_DAY = 3
 
 # Recovery code alphabet: base32 minus visually ambiguous chars (0/O, 1/I/L).
 _RECOVERY_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
