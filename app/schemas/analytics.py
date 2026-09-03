@@ -67,6 +67,28 @@ class RolloverUsageOut(BaseModel):
     off: int
 
 
+class GuestFunnelDailyPoint(BaseModel):
+    day: str
+    created: int
+    claimed: int
+
+
+class GuestFunnelOut(BaseModel):
+    window_days: int
+    guests_created: int
+    guests_first_tx: int
+    guests_claimed: int
+    guests_active_now: int
+    protection_70: int
+    claim_by_passkey: int
+    claim_by_email: int
+    activation_rate: float
+    claim_rate: float
+    anchor_recovery_offered: int
+    silent_loss_rate: float
+    daily: List[GuestFunnelDailyPoint]
+
+
 class PlatformAnalyticsOut(BaseModel):
     user_growth: List[UserGrowthPoint]
     weekly_active: List[WeeklyActivePoint]
