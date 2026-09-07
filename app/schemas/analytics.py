@@ -73,6 +73,14 @@ class GuestFunnelDailyPoint(BaseModel):
     claimed: int
 
 
+class GuestFunnelWallPoint(BaseModel):
+    """One conversion "wall" a guest can hit, and how it converts."""
+    wall: str
+    hits: int              # distinct guests who hit this wall
+    dialog_opened: int     # distinct guests who opened the claim dialog from it
+    claimed_after: int     # distinct guests who hit this wall and later claimed
+
+
 class GuestFunnelOut(BaseModel):
     window_days: int
     guests_created: int
@@ -87,6 +95,7 @@ class GuestFunnelOut(BaseModel):
     anchor_recovery_offered: int
     silent_loss_rate: float
     daily: List[GuestFunnelDailyPoint]
+    per_wall: List[GuestFunnelWallPoint] = []
 
 
 class PlatformAnalyticsOut(BaseModel):

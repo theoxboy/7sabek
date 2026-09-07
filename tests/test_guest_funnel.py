@@ -38,6 +38,15 @@ def test_guest_funnel_counts_the_journey(client: TestClient, database_url: str) 
                 "occurred_on": "2026-09-03",
             },
         )
+    # the guest hits the "reports" wall, opens the claim dialog from it
+    client.post(
+        "/analytics/guest-event",
+        json={"name": "guest_wall_hit", "meta": {"wall": "reports", "route": "/reports"}},
+    )
+    client.post(
+        "/analytics/guest-event",
+        json={"name": "guest_claim_dialog_opened", "meta": {"source": "wall:reports"}},
+    )
     client.post("/auth/guest/ack-recovery")
     client.post(
         "/auth/guest/claim",
@@ -62,3 +71,13 @@ def test_guest_funnel_counts_the_journey(client: TestClient, database_url: str) 
     assert d["claim_by_email"] >= 1
     assert 0.0 <= d["claim_rate"] <= 1.0
     assert isinstance(d["daily"], list)
+
+    walls = {w["wall"]: w for w in d["per_wall"]}
+    assert set(walls) == {
+        "envelopes_cap", "advisor_daily", "reports", "goals",
+        "debts", "export", "history", "multi_device",
+    }
+    assert walls["reports"]["hits"] >= 1
+    assert walls["reports"]["dialog_opened"] >= 1
+    assert walls["reports"]["claimed_after"] >= 1
+    assert walls["goals"]["hits"] == 0

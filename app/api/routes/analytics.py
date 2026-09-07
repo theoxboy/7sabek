@@ -22,6 +22,7 @@ from app.schemas.analytics import (
     ChurnBucketOut,
     GuestFunnelDailyPoint,
     GuestFunnelOut,
+    GuestFunnelWallPoint,
     MonthlyFinancePoint,
     OnboardingActivationOut,
     PageViewIn,
@@ -65,7 +66,27 @@ _GUEST_EVENT_NAMES = {
     "claim_prompt_shown",
     "claim_prompt_dismissed",
     "fragile_context_detected",
+    # Conversion-funnel instrumentation (see 03-spec-instrumentation-conversion.md)
+    "guest_wall_hit",
+    "guest_claim_dialog_opened",
+    "guest_claim_method_selected",
+    "claim_abandoned",
+    "guest_post_ack_prompt_shown",
+    "guest_post_ack_prompt_converted",
+    "guest_post_ack_prompt_dismissed",
 }
+
+# The conversion "walls" a guest can hit, in the order shown on the dashboard.
+_GUEST_WALLS = (
+    "envelopes_cap",
+    "advisor_daily",
+    "reports",
+    "goals",
+    "debts",
+    "export",
+    "history",
+    "multi_device",
+)
 
 
 @router.post("/guest-event", status_code=status.HTTP_201_CREATED)
@@ -158,6 +179,53 @@ async def guest_funnel(
         for d, c, cl in rows.all()
     ]
 
+    per_wall: list[GuestFunnelWallPoint] = []
+    for wall in _GUEST_WALLS:
+        hits = int(
+            await db.scalar(
+                select(func.count(func.distinct(GuestEvent.user_id))).where(
+                    GuestEvent.name == "guest_wall_hit",
+                    GuestEvent.created_at >= start_dt,
+                    GuestEvent.meta["wall"].astext == wall,
+                )
+            )
+            or 0
+        )
+        dialog_opened = int(
+            await db.scalar(
+                select(func.count(func.distinct(GuestEvent.user_id))).where(
+                    GuestEvent.name == "guest_claim_dialog_opened",
+                    GuestEvent.created_at >= start_dt,
+                    GuestEvent.meta["source"].astext == f"wall:{wall}",
+                )
+            )
+            or 0
+        )
+        claimed_after = int(
+            await db.scalar(
+                select(func.count(func.distinct(GuestEvent.user_id))).where(
+                    GuestEvent.name == "claim_completed",
+                    GuestEvent.created_at >= start_dt,
+                    GuestEvent.user_id.in_(
+                        select(GuestEvent.user_id).where(
+                            GuestEvent.name == "guest_wall_hit",
+                            GuestEvent.created_at >= start_dt,
+                            GuestEvent.meta["wall"].astext == wall,
+                        )
+                    ),
+                )
+            )
+            or 0
+        )
+        per_wall.append(
+            GuestFunnelWallPoint(
+                wall=wall,
+                hits=hits,
+                dialog_opened=dialog_opened,
+                claimed_after=claimed_after,
+            )
+        )
+
     return GuestFunnelOut(
         window_days=days,
         guests_created=created,
@@ -172,6 +240,7 @@ async def guest_funnel(
         anchor_recovery_offered=recovery_offered,
         silent_loss_rate=round(recovery_offered / created, 4) if created else 0.0,
         daily=daily,
+        per_wall=per_wall,
     )
 
 
