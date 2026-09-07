@@ -37,6 +37,7 @@ from app.core.password_policy import validate_password_easy
 from app.core.device_signature import anchor_hash as _anchor_hash, confidence_of
 from app.core.guest import (
     IDEMPOTENCY_TTL_HOURS,
+    RECOVERY_CODE_LEN,
     generate_guest_token,
     generate_recovery_code,
     hash_secret,
@@ -242,7 +243,9 @@ def _build_auth_out(
 ) -> AuthOut:
     return AuthOut(
         id=str(user.id),
-        email=user.email,
+        # A guest has no real address — the internal placeholder
+        # (guest.<id>@guests.7sabek.ma) must never leave the API.
+        email=None if bool(getattr(user, "is_guest", False)) else user.email,
         role=user.role,
         status=user.status,
         must_reset_password=user.must_reset_password,
@@ -993,17 +996,22 @@ async def _sweep_expired_idempotency_keys(db: AsyncSession) -> None:
 
 async def _purge_stale_empty_guests(db: AsyncSession, *, older_than_days: int = 30) -> None:
     """
-    Opportunistic cleanup: a guest older than 30 days that never logged a single
-    transaction is not a user, it's noise (the seeded envelopes are ours). A
-    guest who tracked anything is kept forever. Bounded per call so it never
+    Opportunistic cleanup: a guest older than 30 days who never *engaged* is
+    noise (the seeded envelopes are ours). "Engaged" = logged a transaction,
+    OR made a personal envelope allocation, OR acknowledged their recovery code
+    (F16). Any of those and the guest is kept. Bounded per call so it never
     blocks guest creation.
     """
-    from app.models import Transaction
+    from app.models import EnvelopeAllocation, Transaction
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     stale = await db.execute(
         select(User.id)
-        .where(User.is_guest.is_(True), User.guest_created_at < cutoff)
+        .where(
+            User.is_guest.is_(True),
+            User.guest_created_at < cutoff,
+            User.recovery_code_ack_at.is_(None),
+        )
         .limit(20)
     )
     for (uid,) in stale.all():
@@ -1011,6 +1019,13 @@ async def _purge_stale_empty_guests(db: AsyncSession, *, older_than_days: int = 
             select(func.count()).select_from(Transaction).where(Transaction.user_id == uid)
         )
         if (has_tx or 0) > 0:
+            continue
+        has_alloc = await db.scalar(
+            select(func.count()).select_from(EnvelopeAllocation).where(
+                EnvelopeAllocation.user_id == uid
+            )
+        )
+        if (has_alloc or 0) > 0:
             continue
         target = await db.get(User, uid)
         if target is not None:
@@ -1237,7 +1252,7 @@ async def recover_guest(
     """Exchange a recovery code for a session (phase 3 surfaces the UI for this)."""
     await enforce_rate_limit(db, request, "guest_recover", 5, 3600)
     normalized = normalize_recovery_code(payload.recovery_code)
-    if len(normalized) < 4:
+    if len(normalized) != RECOVERY_CODE_LEN:  # codes are exactly 8 chars (app/core/guest.py)
         raise HTTPException(status_code=404, detail={"code": "guest_not_found"})
     result = await db.execute(
         select(User).where(User.recovery_code_hash == hash_secret(normalized))
@@ -1297,12 +1312,38 @@ async def guest_summary(
     )
 
 
+async def _verify_recaptcha_or_400(request: Request, token: Optional[str]) -> None:
+    """Same contract as ``register``: enforce reCAPTCHA when it is configured,
+    and fail closed in a non-local env that somehow has it disabled."""
+    settings = get_settings()
+    is_local_env = settings.environment.strip().lower() in {"local", "development", "dev", "test"}
+    token = (token or "").strip()
+    if settings.recaptcha_enabled:
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "RECAPTCHA_REQUIRED", "message": "أكد أنك ماشي روبوت باش نكملو التسجيل."},
+            )
+        if not await verify_recaptcha_token(token, remote_ip=get_client_ip(request)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "RECAPTCHA_FAILED", "message": "ما قدرناش نتحققو من الحماية. عاود المحاولة."},
+            )
+    elif not is_local_env:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "RECAPTCHA_FAILED", "message": "ما قدرناش نتحققو من الحماية. عاود المحاولة."},
+        )
+
+
 @router.post("/guest/ack-recovery", response_model=AuthOut)
 async def ack_guest_recovery_code(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> AuthOut:
     """The guest confirms they saved their recovery code — protection level 40 → 70."""
+    await enforce_rate_limit(db, request, "guest_ack", 10, 3600)
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
     if user.recovery_code_ack_at is None:
@@ -1334,6 +1375,9 @@ async def claim_guest_account(
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
 
+    await enforce_rate_limit(db, request, "guest_claim", 5, 3600)
+    await _verify_recaptcha_or_400(request, payload.recaptcha_token)
+
     platform_settings = await get_platform_settings(db)
     password_error = validate_password_easy(
         payload.password, max(platform_settings.password_min_length, 8)
@@ -1353,6 +1397,10 @@ async def claim_guest_account(
     user.password_hash = hash_password(payload.password)
     user.is_guest = False
     user.claimed_at = datetime.now(timezone.utc)
+    # The L1 token and recovery code are now meaningless — don't leave their
+    # hashes on a full account (F7).
+    user.guest_token_hash = None
+    user.recovery_code_hash = None
     db.add(
         GuestEvent(
             user_id=user.id,
@@ -1446,6 +1494,9 @@ async def claim_guest_with_passkey(
 
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+
+    await enforce_rate_limit(db, request, "guest_claim", 5, 3600)
+
     passkey_count = await db.scalar(
         select(func.count()).select_from(UserPasskey).where(
             UserPasskey.user_id == user.id,
@@ -1458,6 +1509,9 @@ async def claim_guest_with_passkey(
     prev_level = guest_protection_level(user)
     user.is_guest = False
     user.claimed_at = datetime.now(timezone.utc)
+    # F7 — drop the now-meaningless L1/recovery hashes.
+    user.guest_token_hash = None
+    user.recovery_code_hash = None
     db.add(
         GuestEvent(
             user_id=user.id,

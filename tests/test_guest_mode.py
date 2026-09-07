@@ -18,7 +18,7 @@ def test_guest_is_created_and_authenticated(client: TestClient) -> None:
     assert body["recovery_code"]
     assert body["user"]["is_guest"] is True
     assert body["user"]["protection_level"] == 40
-    assert body["user"]["email"].endswith("@guests.7sabek.ma")  # internal placeholder
+    assert not body["user"].get("email")  # the internal placeholder never leaves the API (F8)
 
     me = client.get("/auth/me")
     assert me.status_code == 200
@@ -59,6 +59,31 @@ def test_recover_with_the_recovery_code(client: TestClient) -> None:
     res = client.post("/auth/guest/recover", json={"recovery_code": f"{code[:4]}-{code[4:]}".lower()})
     assert res.status_code == 200
     assert res.json()["user"]["id"] == body["user"]["id"]
+
+
+def test_recover_rejects_a_code_of_the_wrong_length(client: TestClient) -> None:
+    _create_guest(client)
+    client.cookies.clear()
+    for bad in ("ABCD", "ABCDEFG", "ABCDEFGHJ"):  # not exactly 8 chars → 404, no DB lookup (F9)
+        r = client.post("/auth/guest/recover", json={"recovery_code": bad})
+        assert r.status_code == 404, (bad, r.text)
+
+
+def test_claim_drops_the_recovery_code_and_l1_hashes(client: TestClient) -> None:
+    body = _create_guest(client)
+    code = body["recovery_code"]
+    token = body["guest_token"]
+
+    res = client.post(
+        "/auth/guest/claim",
+        json={"email": "f7@example.com", "password": DEFAULT_PASSWORD},
+    )
+    assert res.status_code == 200, res.text
+
+    client.cookies.clear()
+    # The recovery code and the L1 token no longer resolve to anything (F7).
+    assert client.post("/auth/guest/recover", json={"recovery_code": code}).status_code == 404
+    assert client.post("/auth/guest/resume", json={"token": token}).status_code == 404
 
 
 def test_claim_is_an_update_no_data_moves(client: TestClient) -> None:
@@ -198,3 +223,31 @@ def test_member_is_unaffected(client: TestClient) -> None:
     me = client.get("/auth/me")
     assert me.json()["is_guest"] is False
     assert me.json()["protection_level"] is None
+
+
+def test_guest_cannot_mutate_account_only_features(client: TestClient) -> None:
+    _create_guest(client)
+
+    # Writes to account-only features are refused with a clear code…
+    checks = [
+        ("post", "/goals", {"name": "Vacances", "target_amount": 5000}),
+        ("post", "/debts", {"label": "Pret", "amount": 1000}),
+        ("post", "/sweeps/run", None),
+        ("post", "/income-reminders", {"label": "Salaire", "day_of_month": 1}),
+        ("post", "/distribution/apply", {}),
+        ("patch", "/gamification/settings", {}),
+    ]
+    for method, path, body in checks:
+        res = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+        assert res.status_code == 403, (path, res.status_code, res.text)
+        assert res.json()["detail"]["code"] == "guest_feature_locked", (path, res.text)
+
+    # …but the guest may still read the page (the preview stays alive).
+    assert client.get("/goals").status_code == 200
+    assert client.get("/debts").status_code == 200
+
+
+def test_member_can_still_use_account_features(client: TestClient) -> None:
+    register_user(client, "goals-member@example.com")
+    res = client.post("/goals", json={"name": "Vacances", "target_amount": 5000})
+    assert res.status_code in (200, 201), res.text

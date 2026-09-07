@@ -1,5 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.deps import forbid_guest
 from app.api.routes.categories import router as categories_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.envelopes import router as envelopes_router
@@ -41,21 +42,31 @@ api_router.include_router(analytics_router, tags=["analytics"])
 api_router.include_router(admin_activity_router, tags=["admin-activity"])
 api_router.include_router(admin_backups_router, tags=["admin-backups"])
 api_router.include_router(admin_settings_router, tags=["admin-settings"])
-api_router.include_router(admin_notifications_router, tags=["admin-notifications"])
+# "Mode Découverte" guests may preview these features (GET) but never mutate them
+# — the server-side backstop for the client gating in src/lib/guestGate.ts.
+_GUEST_LOCKED = [Depends(forbid_guest)]
+
+api_router.include_router(
+    admin_notifications_router, tags=["admin-notifications"], dependencies=_GUEST_LOCKED
+)
 api_router.include_router(users_router, tags=["users"])
 api_router.include_router(envelopes_router, tags=["envelopes"])
-api_router.include_router(goals_router, tags=["goals"])
-api_router.include_router(debts_router, tags=["debts"])
-api_router.include_router(income_reminders_router, tags=["income-reminders"])
+api_router.include_router(goals_router, tags=["goals"], dependencies=_GUEST_LOCKED)
+api_router.include_router(debts_router, tags=["debts"], dependencies=_GUEST_LOCKED)
+api_router.include_router(
+    income_reminders_router, tags=["income-reminders"], dependencies=_GUEST_LOCKED
+)
 api_router.include_router(logs_router, tags=["logs"])
 api_router.include_router(gamification_router, tags=["gamification"])
 api_router.include_router(leaderboard_router, tags=["leaderboard"])
 api_router.include_router(categories_router, tags=["categories"])
 api_router.include_router(mappings_router, tags=["mappings"])
 api_router.include_router(transactions_router, tags=["transactions"])
-api_router.include_router(sweeps_router, tags=["sweeps"])
+api_router.include_router(sweeps_router, tags=["sweeps"], dependencies=_GUEST_LOCKED)
 api_router.include_router(dashboard_router, tags=["dashboard"])
-api_router.include_router(distribution_router, tags=["distribution"])
+api_router.include_router(
+    distribution_router, tags=["distribution"], dependencies=_GUEST_LOCKED
+)
 api_router.include_router(reports_router, tags=["reports"])
 api_router.include_router(advisor_router, tags=["advisor"])
 api_router.include_router(email_center_router, tags=["email-center"])

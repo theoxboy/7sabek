@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import forbid_guest, get_current_user
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import PointsLog, User, UserGamification
@@ -79,7 +79,7 @@ async def get_summary(
 async def update_settings(
     payload: GamificationSettingsUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> GamificationSummaryOut:
     gf = await get_or_create_gamification(db, current_user.id)
     gf.leaderboard_opt_in = True
@@ -91,7 +91,7 @@ async def update_settings(
 @router.post("/freeze", response_model=GamificationSummaryOut)
 async def use_freeze(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> GamificationSummaryOut:
     gf = await get_or_create_gamification(db, current_user.id)
     today = to_local_date(datetime.now(timezone.utc))
