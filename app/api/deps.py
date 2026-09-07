@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Optional
 from fastapi import Depends, HTTPException, Request, status
 from uuid import UUID
 from sqlalchemy import select
@@ -125,3 +126,27 @@ async def get_current_user_optional(
         return await get_current_user(request, db)
     except HTTPException:
         return None
+
+
+_GUEST_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+async def forbid_guest(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """
+    Gate a feature that requires a real account.
+
+    "Mode Découverte" guests may still *read* (GET/HEAD/OPTIONS) so the page keeps
+    rendering its preview, but any mutation is refused with 403
+    ``guest_feature_locked``. This is the server-side backstop for the feature
+    gating the client already does in ``src/lib/guestGate.ts`` — never rely on the
+    client alone.
+    """
+    if getattr(current_user, "is_guest", False) and request.method not in _GUEST_SAFE_METHODS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked"},
+        )
+    return current_user

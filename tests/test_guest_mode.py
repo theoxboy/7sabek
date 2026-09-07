@@ -198,3 +198,31 @@ def test_member_is_unaffected(client: TestClient) -> None:
     me = client.get("/auth/me")
     assert me.json()["is_guest"] is False
     assert me.json()["protection_level"] is None
+
+
+def test_guest_cannot_mutate_account_only_features(client: TestClient) -> None:
+    _create_guest(client)
+
+    # Writes to account-only features are refused with a clear code…
+    checks = [
+        ("post", "/goals", {"name": "Vacances", "target_amount": 5000}),
+        ("post", "/debts", {"label": "Pret", "amount": 1000}),
+        ("post", "/sweeps/run", None),
+        ("post", "/income-reminders", {"label": "Salaire", "day_of_month": 1}),
+        ("post", "/distribution/apply", {}),
+        ("patch", "/gamification/settings", {}),
+    ]
+    for method, path, body in checks:
+        res = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+        assert res.status_code == 403, (path, res.status_code, res.text)
+        assert res.json()["detail"]["code"] == "guest_feature_locked", (path, res.text)
+
+    # …but the guest may still read the page (the preview stays alive).
+    assert client.get("/goals").status_code == 200
+    assert client.get("/debts").status_code == 200
+
+
+def test_member_can_still_use_account_features(client: TestClient) -> None:
+    register_user(client, "goals-member@example.com")
+    res = client.post("/goals", json={"name": "Vacances", "target_amount": 5000})
+    assert res.status_code in (200, 201), res.text
