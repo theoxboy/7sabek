@@ -113,6 +113,7 @@ class GuestResumeOut(BaseModel):
 class GuestClaimIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
+    recaptcha_token: Optional[str] = Field(default=None, min_length=1, max_length=4096)
 
 
 class GuestMergeIn(BaseModel):

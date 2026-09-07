@@ -14,6 +14,11 @@ from app.core.config import get_settings
 from app.core.ip_block import is_ip_blocked
 from app.core.logging import configure_logging
 from app.core.platform_settings import get_platform_settings
+from app.core.rate_limit import (
+    build_rate_limit_message,
+    check_rate_limit,
+    get_client_ip,
+)
 from app.db.base import Base
 from app.db.session import get_engine, get_sessionmaker
 

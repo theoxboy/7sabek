@@ -20,6 +20,8 @@ GUEST_ADVISOR_MESSAGES_PER_DAY = 3
 # Recovery code alphabet: base32 minus visually ambiguous chars (0/O, 1/I/L).
 _RECOVERY_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 _RECOVERY_LEN = 8
+# Public alias for callers that validate user-supplied codes.
+RECOVERY_CODE_LEN = _RECOVERY_LEN
 
 IDEMPOTENCY_TTL_HOURS = 24
 

@@ -18,7 +18,7 @@ def test_guest_is_created_and_authenticated(client: TestClient) -> None:
     assert body["recovery_code"]
     assert body["user"]["is_guest"] is True
     assert body["user"]["protection_level"] == 40
-    assert body["user"]["email"].endswith("@guests.7sabek.ma")  # internal placeholder
+    assert not body["user"].get("email")  # the internal placeholder never leaves the API (F8)
 
     me = client.get("/auth/me")
     assert me.status_code == 200
@@ -59,6 +59,31 @@ def test_recover_with_the_recovery_code(client: TestClient) -> None:
     res = client.post("/auth/guest/recover", json={"recovery_code": f"{code[:4]}-{code[4:]}".lower()})
     assert res.status_code == 200
     assert res.json()["user"]["id"] == body["user"]["id"]
+
+
+def test_recover_rejects_a_code_of_the_wrong_length(client: TestClient) -> None:
+    _create_guest(client)
+    client.cookies.clear()
+    for bad in ("ABCD", "ABCDEFG", "ABCDEFGHJ"):  # not exactly 8 chars → 404, no DB lookup (F9)
+        r = client.post("/auth/guest/recover", json={"recovery_code": bad})
+        assert r.status_code == 404, (bad, r.text)
+
+
+def test_claim_drops_the_recovery_code_and_l1_hashes(client: TestClient) -> None:
+    body = _create_guest(client)
+    code = body["recovery_code"]
+    token = body["guest_token"]
+
+    res = client.post(
+        "/auth/guest/claim",
+        json={"email": "f7@example.com", "password": DEFAULT_PASSWORD},
+    )
+    assert res.status_code == 200, res.text
+
+    client.cookies.clear()
+    # The recovery code and the L1 token no longer resolve to anything (F7).
+    assert client.post("/auth/guest/recover", json={"recovery_code": code}).status_code == 404
+    assert client.post("/auth/guest/resume", json={"token": token}).status_code == 404
 
 
 def test_claim_is_an_update_no_data_moves(client: TestClient) -> None:
