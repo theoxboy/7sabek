@@ -91,6 +91,7 @@ from app.schemas.auth import (
     GuestCreateIn,
     GuestCreateOut,
     GuestClaimIn,
+    GuestEmailCodeIn,
     GuestL2HintIn,
     GuestL2HintOut,
     GuestMergeIn,
@@ -1358,6 +1359,45 @@ async def ack_guest_recovery_code(
         await db.commit()
         await db.refresh(user)
     return _build_auth_out(user)
+
+
+@router.post("/guest/email-code", response_model=StatusOut)
+async def email_guest_recovery_code(
+    payload: GuestEmailCodeIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StatusOut:
+    """
+    Email the guest their own recovery code (which the client holds in plaintext).
+    Not a claim — no password, no account. The code is verified against this
+    guest's stored hash before anything is sent.
+    """
+    if not user.is_guest:
+        raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
+    await enforce_rate_limit(db, request, "guest_email_code", 5, 3600)
+
+    normalized = normalize_recovery_code(payload.recovery_code)
+    if (
+        len(normalized) != RECOVERY_CODE_LEN
+        or not user.recovery_code_hash
+        or hash_secret(normalized) != user.recovery_code_hash
+    ):
+        raise HTTPException(status_code=400, detail={"code": "code_mismatch"})
+
+    from app.services.guest_recovery_mailer import send_guest_recovery_email
+
+    locale = (request.headers.get("accept-language") or "fr")[:2]
+    login_url = f"{get_settings().app_base_url.rstrip('/')}/login"
+    await send_guest_recovery_email(
+        to_email=_normalize_email(str(payload.email)),
+        code=normalized,
+        login_url=login_url,
+        locale=locale,
+    )
+    db.add(GuestEvent(user_id=user.id, name="guest_recovery_action", meta={"action": "email"}))
+    await db.commit()
+    return StatusOut(status="ok")
 
 
 @router.post("/guest/claim", response_model=AuthOut)

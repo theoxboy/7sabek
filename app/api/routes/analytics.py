@@ -71,6 +71,7 @@ _GUEST_EVENT_NAMES = {
     "guest_claim_dialog_opened",
     "guest_claim_method_selected",
     "claim_abandoned",
+    "guest_recovery_action",
     "guest_post_ack_prompt_shown",
     "guest_post_ack_prompt_converted",
     "guest_post_ack_prompt_dismissed",

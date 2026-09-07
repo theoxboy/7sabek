@@ -106,6 +106,11 @@ class GuestRecoverIn(BaseModel):
     recovery_code: str = Field(min_length=4, max_length=32)
 
 
+class GuestEmailCodeIn(BaseModel):
+    email: EmailStr
+    recovery_code: str = Field(min_length=4, max_length=32)
+
+
 class GuestResumeOut(BaseModel):
     user: AuthOut
 
