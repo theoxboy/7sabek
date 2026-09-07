@@ -1388,8 +1388,9 @@ async def email_guest_recovery_code(
     from app.services.guest_recovery_mailer import send_guest_recovery_email
 
     locale = (request.headers.get("accept-language") or "fr")[:2]
-    login_url = f"{get_settings().app_base_url.rstrip('/')}/login"
-    await send_guest_recovery_email(
+    # Deep link: /login?rc=<code> pre-fills the recovery field (same as the QR).
+    login_url = f"{get_settings().app_base_url.rstrip('/')}/login?rc={normalized}"
+    delivered = await send_guest_recovery_email(
         to_email=_normalize_email(str(payload.email)),
         code=normalized,
         login_url=login_url,
@@ -1397,7 +1398,9 @@ async def email_guest_recovery_code(
     )
     db.add(GuestEvent(user_id=user.id, name="guest_recovery_action", meta={"action": "email"}))
     await db.commit()
-    return StatusOut(status="ok")
+    # "ok" if actually sent, "queued" when running in log/simulated mode — the
+    # client shows a soft "if the address is valid…" message either way.
+    return StatusOut(status="ok" if delivered else "queued")
 
 
 @router.post("/guest/claim", response_model=AuthOut)
