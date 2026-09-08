@@ -180,6 +180,33 @@ def test_guest_can_log_an_expense_out_of_the_box(client: TestClient) -> None:
     assert s["expense_total"] == 320.0
 
 
+def test_guest_can_declare_income_and_split_it(client: TestClient) -> None:
+    """A guest gets an income category too, so they can declare a salary and
+    then allocate it across the envelopes — without onboarding."""
+    _create_guest(client)
+    cats = {c["name"]: c["id"] for c in client.get("/categories").json()}
+    assert "income_general" in cats
+
+    inc = client.post(
+        "/transactions",
+        json={
+            "category_id": cats["income_general"],
+            "type": "income",
+            "amount": 6000,
+            "occurred_on": "2026-09-03",
+        },
+    )
+    assert inc.status_code == 201, inc.text
+
+    envelopes = client.get("/envelopes").json()
+    target = next(e for e in envelopes if not e.get("is_cash") and not e.get("is_default_savings"))
+    alloc = client.post(
+        f"/envelopes/{target['id']}/allocate-from-cash",
+        json={"amount": "1500", "occurred_on": "2026-09-03"},
+    )
+    assert alloc.status_code in (200, 201), alloc.text
+
+
 def test_ack_recovery_moves_protection_40_to_70(client: TestClient) -> None:
     body = _create_guest(client)
     assert body["user"]["protection_level"] == 40
