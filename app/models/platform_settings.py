@@ -77,13 +77,13 @@ DEFAULT_PLATFORM_SETTINGS = {
     "guest_mode_message_ar": "وضع الاكتشاف موقّف دابا. صاوب حسابك المجاني — كياخد 20 ثانية.",
     "guest_mode_message_type": "info",
     "guest_mode_fallback_cta": True,
-    "guest_mode_placements": ["login", "register"],
+    "guest_mode_placements": ["login", "register", "android"],
     "guest_mode_kill_existing": False,
 }
 
 ALLOWED_GUEST_BUTTON_MODES = {"hidden", "message"}
 ALLOWED_GUEST_MESSAGE_TYPES = {"info", "warning", "soon"}
-ALLOWED_GUEST_PLACEMENTS = {"login", "register", "landing"}
+ALLOWED_GUEST_PLACEMENTS = {"login", "register", "landing", "android"}
 
 ALLOWED_ANNOUNCEMENT_TYPES = {
     "security",

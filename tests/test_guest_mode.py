@@ -19,6 +19,10 @@ def test_guest_is_created_and_authenticated(client: TestClient) -> None:
     assert body["user"]["is_guest"] is True
     assert body["user"]["protection_level"] == 40
     assert not body["user"].get("email")  # the internal placeholder never leaves the API (F8)
+    # Non-browser clients (the Android app) carry the session as bearer tokens.
+    assert body["user"]["access_token"]
+    assert body["user"]["refresh_token"]
+    assert body["user"]["token_type"] == "bearer"
 
     me = client.get("/auth/me")
     assert me.status_code == 200

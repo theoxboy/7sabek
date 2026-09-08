@@ -968,8 +968,13 @@ async def _issue_guest_session(
     request: Request,
     response: Response,
     user: User,
-) -> None:
-    """Give a guest the same cookie triplet a normal login gets."""
+) -> tuple[str, str]:
+    """Give a guest the same cookie triplet a normal login gets.
+
+    Returns the ``(access_token, refresh_token)`` pair so non-browser clients
+    (the Android app) can carry the session as bearer tokens. The web ignores
+    these body fields and rides the cookies.
+    """
     session_token = await _create_or_reuse_account_session(
         db,
         request,
@@ -982,8 +987,9 @@ async def _issue_guest_session(
         os=None,
         device=None,
     )
-    _set_auth_cookies(response, str(user.id))
+    access_token, refresh_token = _set_auth_cookies(response, str(user.id))
     _set_superadmin_session_cookie(response, session_token)
+    return access_token, refresh_token
 
 
 async def _sweep_expired_idempotency_keys(db: AsyncSession) -> None:
@@ -1077,9 +1083,15 @@ async def create_guest(
         if existing is not None:
             replay = await db.get(User, existing.user_id)
             if replay is not None and replay.is_guest:
-                await _issue_guest_session(db, request, response, replay)
+                access_token, refresh_token = await _issue_guest_session(
+                    db, request, response, replay
+                )
                 return GuestCreateOut(
-                    user=_build_auth_out(replay),
+                    user=_build_auth_out(
+                        replay,
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                    ),
                     guest_token=existing.guest_token,
                     recovery_code=existing.recovery_code,
                 )
@@ -1170,9 +1182,13 @@ async def create_guest(
 
     await db.commit()
     await db.refresh(user)
-    await _issue_guest_session(db, request, response, user)
+    access_token, refresh_token = await _issue_guest_session(
+        db, request, response, user
+    )
     return GuestCreateOut(
-        user=_build_auth_out(user),
+        user=_build_auth_out(
+            user, access_token=access_token, refresh_token=refresh_token
+        ),
         guest_token=token,
         recovery_code=recovery_code,
     )
@@ -1202,8 +1218,14 @@ async def _resume_guest_by_hash(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "guest_mode_disabled"},
         )
-    await _issue_guest_session(db, request, response, user)
-    return GuestResumeOut(user=_build_auth_out(user))
+    access_token, refresh_token = await _issue_guest_session(
+        db, request, response, user
+    )
+    return GuestResumeOut(
+        user=_build_auth_out(
+            user, access_token=access_token, refresh_token=refresh_token
+        )
+    )
 
 
 @router.post("/guest/resume", response_model=GuestResumeOut)
@@ -1279,8 +1301,14 @@ async def recover_guest(
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "already_claimed"})
     db.add(GuestEvent(user_id=user.id, name="anchor_recovery_accepted"))
-    await _issue_guest_session(db, request, response, user)
-    return GuestResumeOut(user=_build_auth_out(user))
+    access_token, refresh_token = await _issue_guest_session(
+        db, request, response, user
+    )
+    return GuestResumeOut(
+        user=_build_auth_out(
+            user, access_token=access_token, refresh_token=refresh_token
+        )
+    )
 
 
 @router.get("/guest/summary", response_model=GuestSummaryOut)
@@ -1469,8 +1497,12 @@ async def claim_guest_account(
     await db.commit()
     await db.refresh(user)
 
-    await _issue_guest_session(db, request, response, user)
-    return _build_auth_out(user)
+    access_token, refresh_token = await _issue_guest_session(
+        db, request, response, user
+    )
+    return _build_auth_out(
+        user, access_token=access_token, refresh_token=refresh_token
+    )
 
 
 @router.post("/guest/merge", response_model=GuestMergeOut)
@@ -1529,9 +1561,13 @@ async def merge_guest_account(
     await db.commit()
     await db.refresh(target)
 
-    await _issue_guest_session(db, request, response, target)
+    access_token, refresh_token = await _issue_guest_session(
+        db, request, response, target
+    )
     return GuestMergeOut(
-        user=_build_auth_out(target),
+        user=_build_auth_out(
+            target, access_token=access_token, refresh_token=refresh_token
+        ),
         transactions_merged=result["transactions_merged"],
     )
 
@@ -1579,8 +1615,12 @@ async def claim_guest_with_passkey(
     )
     await db.commit()
     await db.refresh(user)
-    await _issue_guest_session(db, request, response, user)
-    return _build_auth_out(user)
+    access_token, refresh_token = await _issue_guest_session(
+        db, request, response, user
+    )
+    return _build_auth_out(
+        user, access_token=access_token, refresh_token=refresh_token
+    )
 
 
 async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
