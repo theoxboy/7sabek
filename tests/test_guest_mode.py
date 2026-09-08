@@ -190,6 +190,26 @@ def test_ack_recovery_moves_protection_40_to_70(client: TestClient) -> None:
     assert client.post("/auth/guest/ack-recovery").json()["protection_level"] == 70
 
 
+def test_email_code_verifies_the_code_and_is_not_a_claim(client: TestClient) -> None:
+    body = _create_guest(client)
+    code = body["recovery_code"]
+
+    # wrong code → rejected, nothing sent
+    bad = client.post(
+        "/auth/guest/email-code", json={"email": "me@example.com", "recovery_code": "AAAA-AAAA"}
+    )
+    assert bad.status_code == 400
+    assert bad.json()["detail"]["code"] == "code_mismatch"
+
+    # right code (grouped form accepted) → ok, still a guest (not a claim)
+    ok = client.post(
+        "/auth/guest/email-code",
+        json={"email": "me@example.com", "recovery_code": f"{code[:4]}-{code[4:]}"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert client.get("/auth/me").json()["is_guest"] is True
+
+
 def test_claimed_guest_carries_claimed_at(client: TestClient) -> None:
     _create_guest(client)
     res = client.post(
