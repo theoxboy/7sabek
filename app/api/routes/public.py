@@ -88,4 +88,14 @@ async def get_platform_status(
         announcements=announcements,
         account_deletion_grace_days=settings.account_deletion_grace_days,
         features={"passkeys": passkeys_public_enabled},
+        guest_mode_enabled=bool(getattr(settings, "guest_mode_enabled", True)),
+        guest_mode_button=getattr(settings, "guest_mode_button", "message") or "message",
+        guest_mode_message_fr=getattr(settings, "guest_mode_message_fr", "") or "",
+        guest_mode_message_en=getattr(settings, "guest_mode_message_en", "") or "",
+        guest_mode_message_ar=getattr(settings, "guest_mode_message_ar", "") or "",
+        guest_mode_message_type=getattr(settings, "guest_mode_message_type", "info") or "info",
+        guest_mode_fallback_cta=bool(getattr(settings, "guest_mode_fallback_cta", True)),
+        guest_mode_placements=list(
+            getattr(settings, "guest_mode_placements", None) or ["login", "register"]
+        ),
     )

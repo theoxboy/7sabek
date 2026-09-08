@@ -96,6 +96,9 @@ class GuestFunnelOut(BaseModel):
     silent_loss_rate: float
     daily: List[GuestFunnelDailyPoint]
     per_wall: List[GuestFunnelWallPoint] = []
+    protection_40: int = 0
+    protection_100: int = 0
+    guests_at_risk: int = 0
 
 
 class PlatformAnalyticsOut(BaseModel):

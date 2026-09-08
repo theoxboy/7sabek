@@ -18,6 +18,9 @@ from app.models.platform_settings import (
     ALLOWED_ANNOUNCEMENT_ROLES,
     ALLOWED_ANNOUNCEMENT_STATUSES,
     ALLOWED_ANNOUNCEMENT_TYPES,
+    ALLOWED_GUEST_BUTTON_MODES,
+    ALLOWED_GUEST_MESSAGE_TYPES,
+    ALLOWED_GUEST_PLACEMENTS,
     ALLOWED_MESSAGE_PLACEMENTS,
 )
 from app.schemas.platform_settings import PlatformSettingsOut, PlatformSettingsUpdate
@@ -358,6 +361,20 @@ async def update_platform_settings_route(
             update_data["announcement_roles"] = ["any"]
             update_data["announcement_statuses"] = ["any"]
             update_data["announcement_countries"] = []
+
+    if update_data.get("guest_mode_button") is not None:
+        if update_data["guest_mode_button"] not in ALLOWED_GUEST_BUTTON_MODES:
+            raise HTTPException(status_code=400, detail="Invalid guest_mode_button")
+    if update_data.get("guest_mode_message_type") is not None:
+        if update_data["guest_mode_message_type"] not in ALLOWED_GUEST_MESSAGE_TYPES:
+            raise HTTPException(status_code=400, detail="Invalid guest_mode_message_type")
+    if "guest_mode_placements" in update_data:
+        placements = update_data["guest_mode_placements"] or []
+        if not isinstance(placements, list) or any(
+            p not in ALLOWED_GUEST_PLACEMENTS for p in placements
+        ):
+            raise HTTPException(status_code=400, detail="Invalid guest_mode_placements")
+        update_data["guest_mode_placements"] = [str(p) for p in placements]
 
     if "ai_gateways" in update_data:
         update_data["ai_gateways"] = _normalize_ai_gateways(update_data["ai_gateways"] or [])

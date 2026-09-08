@@ -17,6 +17,7 @@ from app.api.routes.analytics import router as analytics_router
 from app.api.routes.admin_activity import router as admin_activity_router
 from app.api.routes.admin_backups import router as admin_backups_router
 from app.api.routes.admin_settings import router as admin_settings_router
+from app.api.routes.guest_admin import router as guest_admin_router
 from app.api.routes.public import router as public_router
 from app.api.routes.distribution import router as distribution_router
 from app.api.routes.reports import router as reports_router
@@ -42,6 +43,7 @@ api_router.include_router(analytics_router, tags=["analytics"])
 api_router.include_router(admin_activity_router, tags=["admin-activity"])
 api_router.include_router(admin_backups_router, tags=["admin-backups"])
 api_router.include_router(admin_settings_router, tags=["admin-settings"])
+api_router.include_router(guest_admin_router, tags=["admin-guests"])
 # "Mode Découverte" guests may preview these features (GET) but never mutate them
 # — the server-side backstop for the client gating in src/lib/guestGate.ts.
 _GUEST_LOCKED = [Depends(forbid_guest)]

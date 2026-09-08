@@ -86,6 +86,15 @@ class PlatformSettingsOut(BaseModel):
     password_min_length: int
     default_auto_distribution_enabled: bool
     account_deletion_grace_days: int
+    guest_mode_enabled: bool = True
+    guest_mode_button: str = "message"
+    guest_mode_message_fr: str = ""
+    guest_mode_message_en: str = ""
+    guest_mode_message_ar: str = ""
+    guest_mode_message_type: str = "info"
+    guest_mode_fallback_cta: bool = True
+    guest_mode_placements: list[str] = Field(default_factory=lambda: ["login", "register"])
+    guest_mode_kill_existing: bool = False
 
 
 class PlatformSettingsUpdate(BaseModel):
@@ -123,6 +132,15 @@ class PlatformSettingsUpdate(BaseModel):
     password_min_length: Optional[int] = Field(default=None, ge=6, le=128)
     default_auto_distribution_enabled: Optional[bool] = None
     account_deletion_grace_days: Optional[int] = Field(default=None, ge=1, le=365)
+    guest_mode_enabled: Optional[bool] = None
+    guest_mode_button: Optional[str] = Field(default=None, max_length=16)
+    guest_mode_message_fr: Optional[str] = Field(default=None, max_length=600)
+    guest_mode_message_en: Optional[str] = Field(default=None, max_length=600)
+    guest_mode_message_ar: Optional[str] = Field(default=None, max_length=600)
+    guest_mode_message_type: Optional[str] = Field(default=None, max_length=16)
+    guest_mode_fallback_cta: Optional[bool] = None
+    guest_mode_placements: Optional[list[str]] = None
+    guest_mode_kill_existing: Optional[bool] = None
 
 
 class PlatformStatusOut(BaseModel):
@@ -148,3 +166,11 @@ class PlatformStatusOut(BaseModel):
     announcements: list[AnnouncementPublicOut] = Field(default_factory=list)
     account_deletion_grace_days: int
     features: dict[str, bool] = Field(default_factory=dict)
+    guest_mode_enabled: bool = True
+    guest_mode_button: str = "message"
+    guest_mode_message_fr: str = ""
+    guest_mode_message_en: str = ""
+    guest_mode_message_ar: str = ""
+    guest_mode_message_type: str = "info"
+    guest_mode_fallback_cta: bool = True
+    guest_mode_placements: list[str] = Field(default_factory=lambda: ["login", "register"])
