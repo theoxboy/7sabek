@@ -66,9 +66,12 @@ api_router.include_router(mappings_router, tags=["mappings"])
 api_router.include_router(transactions_router, tags=["transactions"])
 api_router.include_router(sweeps_router, tags=["sweeps"], dependencies=_GUEST_LOCKED)
 api_router.include_router(dashboard_router, tags=["dashboard"])
-api_router.include_router(
-    distribution_router, tags=["distribution"], dependencies=_GUEST_LOCKED
-)
+# "Mode Découverte" guests can run the income-distribution journey end to end —
+# split their salary, then the envelopes get created — so distribution is NOT
+# guest-locked. Their envelopes and split live on the same account row and
+# survive an account claim untouched. The envelope ceiling still applies via the
+# guest_quota check on POST /envelopes.
+api_router.include_router(distribution_router, tags=["distribution"])
 api_router.include_router(reports_router, tags=["reports"])
 api_router.include_router(advisor_router, tags=["advisor"])
 api_router.include_router(email_center_router, tags=["email-center"])

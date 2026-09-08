@@ -258,7 +258,6 @@ def test_guest_cannot_mutate_account_only_features(client: TestClient) -> None:
         ("post", "/debts", {"label": "Pret", "amount": 1000}),
         ("post", "/sweeps/run", None),
         ("post", "/income-reminders", {"label": "Salaire", "day_of_month": 1}),
-        ("post", "/distribution/apply", {}),
         ("patch", "/gamification/settings", {}),
     ]
     for method, path, body in checks:
@@ -269,6 +268,29 @@ def test_guest_cannot_mutate_account_only_features(client: TestClient) -> None:
     # …but the guest may still read the page (the preview stays alive).
     assert client.get("/goals").status_code == 200
     assert client.get("/debts").status_code == 200
+
+
+def test_guest_can_run_the_income_distribution_journey(client: TestClient) -> None:
+    """Splitting income into envelopes is the whole point of Mode Découverte —
+    distribution is not guest-locked."""
+    _create_guest(client)
+
+    # Reads and mutations both go through — no guest_feature_locked here.
+    assert client.get("/distribution/rules").status_code == 200
+    assert client.post("/distribution/onboarding-status", json={}).status_code == 200
+
+    for name in ("Loyer", "Courses"):
+        client.post("/envelopes", json={"name": name, "rollover_enabled": False})
+    saved = client.post(
+        "/distribution/configs",
+        json={
+            "name": "Ma répartition",
+            "auto_enabled": False,
+            "percent_mode": "equal",
+            "rows": [],
+        },
+    )
+    assert saved.status_code in (200, 201), saved.text
 
 
 def test_member_can_still_use_account_features(client: TestClient) -> None:
