@@ -64,7 +64,26 @@ DEFAULT_PLATFORM_SETTINGS = {
     "password_min_length": 8,
     "default_auto_distribution_enabled": False,
     "account_deletion_grace_days": 30,
+    "guest_mode_enabled": True,
+    "guest_mode_button": "message",
+    "guest_mode_message_fr": (
+        "Le mode découverte est en pause pour le moment. "
+        "Crée ton compte gratuit — ça prend 20 secondes."
+    ),
+    "guest_mode_message_en": (
+        "Discovery mode is paused for now. "
+        "Create your free account — it takes 20 seconds."
+    ),
+    "guest_mode_message_ar": "وضع الاكتشاف موقّف دابا. صاوب حسابك المجاني — كياخد 20 ثانية.",
+    "guest_mode_message_type": "info",
+    "guest_mode_fallback_cta": True,
+    "guest_mode_placements": ["login", "register"],
+    "guest_mode_kill_existing": False,
 }
+
+ALLOWED_GUEST_BUTTON_MODES = {"hidden", "message"}
+ALLOWED_GUEST_MESSAGE_TYPES = {"info", "warning", "soon"}
+ALLOWED_GUEST_PLACEMENTS = {"login", "register", "landing"}
 
 ALLOWED_ANNOUNCEMENT_TYPES = {
     "security",
@@ -283,4 +302,40 @@ class PlatformSettings(Base):
         Integer,
         nullable=False,
         default=DEFAULT_PLATFORM_SETTINGS["account_deletion_grace_days"],
+    )
+    guest_mode_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_enabled"],
+    )
+    guest_mode_button: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="message",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_button"],
+    )
+    guest_mode_message_fr: Mapped[str] = mapped_column(
+        String(600), nullable=False, server_default="",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_message_fr"],
+    )
+    guest_mode_message_en: Mapped[str] = mapped_column(
+        String(600), nullable=False, server_default="",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_message_en"],
+    )
+    guest_mode_message_ar: Mapped[str] = mapped_column(
+        String(600), nullable=False, server_default="",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_message_ar"],
+    )
+    guest_mode_message_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="info",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_message_type"],
+    )
+    guest_mode_fallback_cta: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_fallback_cta"],
+    )
+    guest_mode_placements: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False,
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_placements"],
+    )
+    guest_mode_kill_existing: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false",
+        default=DEFAULT_PLATFORM_SETTINGS["guest_mode_kill_existing"],
     )

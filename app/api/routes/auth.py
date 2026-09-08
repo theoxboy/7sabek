@@ -1062,6 +1062,11 @@ async def create_guest(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=build_maintenance_message(platform_settings.maintenance_message),
         )
+    if not bool(getattr(platform_settings, "guest_mode_enabled", True)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_mode_disabled"},
+        )
     await enforce_rate_limit(db, request, "guest_create", 5, 3600)
 
     idem_key = (request.headers.get("Idempotency-Key") or "").strip()[:128]
@@ -1186,6 +1191,16 @@ async def _resume_guest_by_hash(
         raise HTTPException(status_code=404, detail={"code": "guest_not_found"})
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "already_claimed"})
+    # If discovery mode is off AND the superadmin chose to cut existing sessions,
+    # stop resuming too (the default is to let live guests finish).
+    _ps = await get_platform_settings(db)
+    if not bool(getattr(_ps, "guest_mode_enabled", True)) and bool(
+        getattr(_ps, "guest_mode_kill_existing", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_mode_disabled"},
+        )
     await _issue_guest_session(db, request, response, user)
     return GuestResumeOut(user=_build_auth_out(user))
 

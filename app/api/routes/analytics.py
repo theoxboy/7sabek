@@ -161,6 +161,19 @@ async def guest_funnel(
         or 0
     )
 
+    # Current protection split among live guests (for the /superadmin/guests donut).
+    protection_70_now = int(
+        await db.scalar(
+            select(func.count()).select_from(User).where(
+                User.is_guest.is_(True),
+                User.deleted_at.is_(None),
+                User.recovery_code_ack_at.is_not(None),
+            )
+        )
+        or 0
+    )
+    protection_40_now = max(0, active_now - protection_70_now)
+
     rows = await db.execute(
         select(
             func.date(GuestEvent.created_at),
@@ -241,6 +254,9 @@ async def guest_funnel(
         silent_loss_rate=round(recovery_offered / created, 4) if created else 0.0,
         daily=daily,
         per_wall=per_wall,
+        protection_40=protection_40_now,
+        protection_100=claimed,
+        guests_at_risk=0,
     )
 
 
