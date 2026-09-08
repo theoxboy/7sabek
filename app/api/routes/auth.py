@@ -1150,6 +1150,11 @@ async def create_guest(
             CategoryEnvelopeMap(user_id=user.id, category_id=cat.id, envelope_id=env.id)
         )
 
+    # An income category so "add income" works before onboarding: a guest can
+    # declare a salary and then split it across the envelopes. Income needs no
+    # envelope mapping. Same internal key registration / onboarding would use.
+    db.add(Category(id=uuid4(), user_id=user.id, name="income_general"))
+
     if idem_key:
         db.add(
             GuestIdempotencyKey(
