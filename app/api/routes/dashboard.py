@@ -472,6 +472,7 @@ async def get_dashboard(
             email=current_user.email,
             currency=current_user.currency,
             sweep_interval_days=current_user.sweep_interval_days,
+            is_guest=bool(getattr(current_user, "is_guest", False)),
         ),
         current_period=CurrentPeriodOut(start=period_start, end=period_end),
         sweep_status=sweep_status,

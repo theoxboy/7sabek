@@ -16,6 +16,7 @@ class DashboardUserOut(BaseModel):
     email: str
     currency: str
     sweep_interval_days: int
+    is_guest: bool = False
 
 
 class CurrentPeriodOut(BaseModel):
