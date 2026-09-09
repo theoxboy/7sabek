@@ -13,7 +13,8 @@ from app.schemas.transaction import TransactionOut
 
 class DashboardUserOut(BaseModel):
     id: UUID
-    email: str
+    # Guests carry an internal placeholder address that must never leave the API.
+    email: Optional[str] = None
     currency: str
     sweep_interval_days: int
     is_guest: bool = False
