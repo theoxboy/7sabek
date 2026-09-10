@@ -1643,7 +1643,6 @@ async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
         CategoryEnvelopeMap,
         Debt,
         DeviceAnchor,
-        DeviceToken,
         DistributionItem,
         DistributionLog,
         DistributionRule,
@@ -1667,11 +1666,11 @@ async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
         SuperadminSession,
         Sweep,
         Transaction,
-        UserCategoryPreferences,
+        UserCategoryPreference,
         UserGamification,
         UserPasskey,
         UserShiftPilotState,
-        WebauthnChallenge,
+        WebAuthnChallenge,
         WebLoginToken,
     )
 
@@ -1702,36 +1701,29 @@ async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
         DeviceAnchor,
         WebLoginToken,
         UserPasskey,
-        WebauthnChallenge,
+        WebAuthnChallenge,
         PasswordResetToken,
         SuperadminSession,
-        DeviceToken,
         AdvisorChatMessage,
         AdvisorDecision,
         AdvisorPreview,
         AdvisorPreApplyValidation,
         UserShiftPilotState,
-        UserCategoryPreferences,
+        UserCategoryPreference,
         OnboardingV2Record,
         PageView,
     )
 
     for model in models_to_purge:
-        try:
-            await db.execute(_delete(model).where(model.user_id == user_id))
-        except Exception:
-            pass
+        await db.execute(_delete(model).where(model.user_id == user_id))
 
     # Clear any password_reset_blocked_by_user_id self-ref or pointer to this user
-    try:
-        from app.models import User
-        await db.execute(
-            update(User)
-            .where(User.password_reset_blocked_by_user_id == user_id)
-            .values(password_reset_blocked_by_user_id=None)
-        )
-    except Exception:
-        pass
+    from app.models import User
+    await db.execute(
+        update(User)
+        .where(User.password_reset_blocked_by_user_id == user_id)
+        .values(password_reset_blocked_by_user_id=None)
+    )
 
 
 @router.delete("/guest", status_code=status.HTTP_204_NO_CONTENT)
