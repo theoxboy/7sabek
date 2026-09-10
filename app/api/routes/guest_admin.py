@@ -181,6 +181,16 @@ async def list_guests(
     return GuestAdminListOut(rows=rows, total=total, next_cursor=next_cursor)
 
 
+@router.get("/funnel")
+async def get_guest_funnel(
+    days: int = Query(30, ge=1, le=180),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.api.routes.analytics import guest_funnel
+    return await guest_funnel(days=days, db=db, current_user=current_user)
+
+
 @router.get("/{guest_id}", response_model=GuestAdminDetailOut)
 async def get_guest(
     guest_id: str,
@@ -189,7 +199,13 @@ async def get_guest(
 ) -> GuestAdminDetailOut:
     _require_superadmin(current_user)
 
-    user = await db.get(User, guest_id)
+    from uuid import UUID
+    try:
+        user_uuid = UUID(guest_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="NOT_FOUND")
+
+    user = await db.get(User, user_uuid)
     if user is None or not user.is_guest:
         raise HTTPException(status_code=404, detail="NOT_FOUND")
 
@@ -298,31 +314,45 @@ async def purge_guest(
 ) -> Response:
     _require_superadmin(current_user)
 
+    from uuid import UUID
+    from sqlalchemy import delete as _delete, update
     from app.api.routes.auth import _purge_guest_owned_rows
 
-    user = await db.get(User, guest_id)
+    try:
+        user_uuid = UUID(guest_id)
+    except (ValueError, TypeError):
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    user = await db.get(User, user_uuid)
     if user is None or not user.is_guest:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    await _purge_guest_owned_rows(db, user.id)
-    await db.execute(
-        GuestIdempotencyKey.__table__.delete().where(GuestIdempotencyKey.user_id == user.id)
-    )
-    await db.execute(
-        GuestEvent.__table__.delete().where(GuestEvent.user_id == user.id)
-    )
-    await db.execute(
-        DeviceAnchor.__table__.delete().where(DeviceAnchor.user_id == user.id)
-    )
-    await db.delete(user)
-    await db.commit()
+    try:
+        await _purge_guest_owned_rows(db, user.id)
+        await db.execute(
+            update(User)
+            .where(User.password_reset_blocked_by_user_id == user.id)
+            .values(password_reset_blocked_by_user_id=None)
+        )
+        await db.execute(_delete(User).where(User.id == user.id))
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la purge de l'invité: {exc}",
+        )
 
-    await create_admin_log(
-        db,
-        event_type="guest_purged",
-        status="success",
-        message=f"Invité {guest_id} purgé par un superadmin",
-        actor_email=current_user.email,
-        actor_ip=get_client_ip(request),
-    )
+    try:
+        await create_admin_log(
+            db,
+            event_type="guest_purged",
+            status="success",
+            message=f"Invité {guest_id} purgé par un superadmin",
+            actor_email=current_user.email,
+            actor_ip=get_client_ip(request),
+        )
+    except Exception:
+        pass
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)

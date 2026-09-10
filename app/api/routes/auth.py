@@ -1630,14 +1630,25 @@ async def claim_guest_with_passkey(
 
 async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
     """
-    Hard-delete a guest's data. Most user-referencing tables already have
-    ON DELETE CASCADE; these are the ones that don't and that a guest can fill.
+    Hard-delete a guest's data across all tables.
     Ordered children-first so no FK is violated.
     """
-    from sqlalchemy import delete as _delete
+    from sqlalchemy import delete as _delete, update
     from app.models import (
+        AdvisorChatMessage,
+        AdvisorDecision,
+        AdvisorPreApplyValidation,
+        AdvisorPreview,
         Category,
         CategoryEnvelopeMap,
+        Debt,
+        DeviceAnchor,
+        DeviceToken,
+        DistributionItem,
+        DistributionLog,
+        DistributionRule,
+        DistributionRun,
+        DistributionSavedConfig,
         Envelope,
         EnvelopeAdjustmentLog,
         EnvelopeAllocation,
@@ -1645,26 +1656,82 @@ async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
         EnvelopePeriod,
         EnvelopeTransferLog,
         Goal,
+        GuestEvent,
+        GuestIdempotencyKey,
+        IncomeReminder,
+        LeaderboardNameChange,
+        OnboardingV2Record,
         PageView,
+        PasswordResetToken,
+        PointsLog,
+        SuperadminSession,
         Sweep,
         Transaction,
+        UserCategoryPreferences,
+        UserGamification,
+        UserPasskey,
+        UserShiftPilotState,
+        WebauthnChallenge,
+        WebLoginToken,
     )
 
-    for model in (
+    models_to_purge = (
         EnvelopeMovement,
+        PointsLog,
+        DistributionItem,
+        DistributionLog,
+        DistributionRun,
+        DistributionRule,
+        DistributionSavedConfig,
+        Transaction,
         EnvelopeAllocation,
         EnvelopePeriod,
         EnvelopeTransferLog,
         EnvelopeAdjustmentLog,
-        CategoryEnvelopeMap,
-        Transaction,
-        Sweep,
         Goal,
-        PageView,
+        CategoryEnvelopeMap,
+        Sweep,
         Category,
         Envelope,
-    ):
-        await db.execute(_delete(model).where(model.user_id == user_id))
+        Debt,
+        IncomeReminder,
+        UserGamification,
+        LeaderboardNameChange,
+        GuestIdempotencyKey,
+        GuestEvent,
+        DeviceAnchor,
+        WebLoginToken,
+        UserPasskey,
+        WebauthnChallenge,
+        PasswordResetToken,
+        SuperadminSession,
+        DeviceToken,
+        AdvisorChatMessage,
+        AdvisorDecision,
+        AdvisorPreview,
+        AdvisorPreApplyValidation,
+        UserShiftPilotState,
+        UserCategoryPreferences,
+        OnboardingV2Record,
+        PageView,
+    )
+
+    for model in models_to_purge:
+        try:
+            await db.execute(_delete(model).where(model.user_id == user_id))
+        except Exception:
+            pass
+
+    # Clear any password_reset_blocked_by_user_id self-ref or pointer to this user
+    try:
+        from app.models import User
+        await db.execute(
+            update(User)
+            .where(User.password_reset_blocked_by_user_id == user_id)
+            .values(password_reset_blocked_by_user_id=None)
+        )
+    except Exception:
+        pass
 
 
 @router.delete("/guest", status_code=status.HTTP_204_NO_CONTENT)
@@ -1680,12 +1747,8 @@ async def delete_guest_data(
     user_id = user.id
     await _end_superadmin_session_from_request(request, db)
     await _purge_guest_owned_rows(db, user_id)
-    await db.execute(
-        GuestIdempotencyKey.__table__.delete().where(
-            GuestIdempotencyKey.user_id == user_id
-        )
-    )
-    await db.delete(user)
+    from sqlalchemy import delete as _delete
+    await db.execute(_delete(User).where(User.id == user_id))
     await db.commit()
     _clear_auth_cookies(response)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

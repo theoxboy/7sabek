@@ -37,9 +37,11 @@ from app.schemas.analytics import (
 )
 
 router = APIRouter(prefix="/analytics")
+pulse_router = APIRouter(prefix="/pulse")
 
 
 @router.post("/pageviews", status_code=status.HTTP_201_CREATED)
+@pulse_router.post("/pageviews", status_code=status.HTTP_201_CREATED)
 async def create_page_view(
     payload: PageViewIn,
     db: AsyncSession = Depends(get_db),
