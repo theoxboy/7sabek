@@ -81,15 +81,19 @@ def _ensure_enabled() -> None:
 
 
 def _is_user_allowed_for_passkeys(user: Optional[User]) -> bool:
-    # A guest claiming an account with a passkey has only a placeholder email;
+    # A guest claiming an account with a passkey has only a placeholder email (or null after claim);
     # gate them on the feature flag itself, not the allow-list.
-    if user is not None and getattr(user, "is_guest", False):
+    if user is not None and (
+        getattr(user, "is_guest", False)
+        or getattr(user, "claimed_at", None) is not None
+        or not user.email
+    ):
         return get_settings().enable_passkeys
     return is_passkeys_enabled_for_email(user.email if user is not None else None)
 
 
 def _passkey_user_name(user: User) -> str:
-    if getattr(user, "is_guest", False):
+    if getattr(user, "is_guest", False) or not user.email:
         return "invite@7sabek.ma"
     return user.email or "user@7sabek.ma"
 

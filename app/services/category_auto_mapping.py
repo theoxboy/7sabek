@@ -4,10 +4,10 @@ import re
 from uuid import UUID
 import logging
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Category, CategoryEnvelopeMap, Envelope
+from app.models import Category, CategoryEnvelopeMap, Envelope, User
 from app.services.category_catalog import category_key_from_name, is_internal_income_category_key
 from app.services.envelope_rules import is_category_mappable_envelope, normalize_name
 
@@ -372,6 +372,14 @@ async def _get_or_create_default_group_envelope(
     )
     if existing is not None:
         return existing
+    user = await db.get(User, user_id)
+    if user is not None and getattr(user, "is_guest", False):
+        from app.core.guest import GUEST_MAX_ENVELOPES
+        total_envs = await db.scalar(
+            select(func.count()).select_from(Envelope).where(Envelope.user_id == user_id)
+        )
+        if (total_envs or 0) >= GUEST_MAX_ENVELOPES:
+            return None
     created = Envelope(
         user_id=user_id,
         name=default_envelope_name,

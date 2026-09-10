@@ -96,3 +96,31 @@ def test_guest_list_requires_superadmin(client: TestClient, database_url: str) -
     register_user(client, "plain-guest-list@example.com")
     res = client.get("/admin/guests", headers={"x-admin-bypass": "true"})
     assert res.status_code == 403
+
+
+def test_claimed_guests_appear_in_admin_list_and_detail(client: TestClient, database_url: str) -> None:
+    client.cookies.clear()
+    guest = client.post("/auth/guest", json={}).json()
+    guest_id = guest["user"]["id"]
+
+    claim_res = client.post(
+        "/auth/guest/claim",
+        json={"email": "claimed-guest-admin@example.com", "password": "StrongPassword123!"},
+    )
+    assert claim_res.status_code == 200
+
+    client.cookies.clear()
+    _superadmin(client, database_url, "sa-claimed-audit@example.com")
+    h = {"x-admin-bypass": "true"}
+
+    lst = client.get("/admin/guests?status=claimed", headers=h)
+    assert lst.status_code == 200
+    rows = lst.json()["rows"]
+    matched = [r for r in rows if r["id"] == guest_id]
+    assert len(matched) == 1
+    assert matched[0]["claimed_at"] is not None
+
+    detail = client.get(f"/admin/guests/{guest_id}", headers=h)
+    assert detail.status_code == 200
+    assert detail.json()["claimed_at"] is not None
+

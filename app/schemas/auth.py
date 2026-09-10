@@ -113,6 +113,7 @@ class GuestEmailCodeIn(BaseModel):
 
 class GuestResumeOut(BaseModel):
     user: AuthOut
+    guest_token: Optional[str] = None
 
 
 class GuestClaimIn(BaseModel):

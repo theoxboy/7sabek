@@ -50,7 +50,7 @@ async def merge_guest_into_account(
                 select(Transaction)
                 .where(
                     Transaction.user_id == guest.id,
-                    Transaction.type == TransactionType.EXPENSE,
+                    Transaction.type.in_([TransactionType.EXPENSE, TransactionType.INCOME]),
                 )
                 .order_by(Transaction.occurred_on, Transaction.created_at)
             )
@@ -92,6 +92,28 @@ async def merge_guest_into_account(
     merged = 0
 
     for txn in guest_txns:
+        if txn.type == TransactionType.INCOME:
+            target_cat = target_cat_by_key.get("income_general")
+            if target_cat is None:
+                target_cat = Category(user_id=target.id, name="income_general")
+                db.add(target_cat)
+                await db.flush()
+                target_cat_by_key["income_general"] = target_cat
+            await create_transaction_with_effects(
+                db,
+                target,
+                target_cat,
+                TransactionType.INCOME,
+                txn.amount,
+                txn.occurred_on,
+                txn.description,
+                source="guest_merge",
+                commit=False,
+                enforce_auto_distribution_flag=False,
+            )
+            merged += 1
+            continue
+
         raw_name = guest_cat_name.get(txn.category_id) or "miscellaneous"
         key = name_key(raw_name)
         target_cat = target_cat_by_key.get(key)

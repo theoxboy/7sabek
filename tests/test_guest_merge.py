@@ -75,3 +75,33 @@ def test_merge_with_no_expenses_still_signs_into_the_account(client: TestClient)
     assert res.status_code == 200
     assert res.json()["transactions_merged"] == 0
     assert client.get("/auth/me").json()["email"] == "target3@example.com"
+
+
+def test_merge_replays_guest_incomes_onto_the_existing_account(client: TestClient) -> None:
+    register_user(client, "target_inc@example.com")
+    client.cookies.clear()
+
+    client.post("/auth/guest", json={})
+    cats = {c["name"]: c["id"] for c in client.get("/categories").json()}
+    r = client.post(
+        "/transactions",
+        json={
+            "category_id": cats["income_general"],
+            "type": "income",
+            "amount": 5000,
+            "occurred_on": "2026-09-03",
+        },
+    )
+    assert r.status_code == 201
+
+    res = client.post(
+        "/auth/guest/merge",
+        json={"email": "target_inc@example.com", "password": DEFAULT_PASSWORD},
+    )
+    assert res.status_code == 200
+    assert res.json()["transactions_merged"] == 1
+
+    txns = client.get("/transactions").json()
+    incomes = [t for t in txns if t["type"] == "income"]
+    assert any(float(t["amount"]) == 5000.0 for t in incomes)
+

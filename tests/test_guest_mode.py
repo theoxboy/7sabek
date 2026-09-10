@@ -63,6 +63,10 @@ def test_recover_with_the_recovery_code(client: TestClient) -> None:
     res = client.post("/auth/guest/recover", json={"recovery_code": f"{code[:4]}-{code[4:]}".lower()})
     assert res.status_code == 200
     assert res.json()["user"]["id"] == body["user"]["id"]
+    new_token = res.json().get("guest_token")
+    assert new_token is not None
+    client.cookies.clear()
+    assert client.post("/auth/guest/resume", json={"token": new_token}).status_code == 200
 
 
 def test_recover_rejects_a_code_of_the_wrong_length(client: TestClient) -> None:

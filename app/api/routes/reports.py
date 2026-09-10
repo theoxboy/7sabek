@@ -250,6 +250,11 @@ async def export_csv(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Response:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "message": "Guest accounts cannot export data."},
+        )
     _validate_range(start, end)
 
     result = await db.execute(

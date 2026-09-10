@@ -1019,7 +1019,7 @@ async def _purge_stale_empty_guests(db: AsyncSession, *, older_than_days: int = 
             User.guest_created_at < cutoff,
             User.recovery_code_ack_at.is_(None),
         )
-        .limit(20)
+        .limit(1)
     )
     for (uid,) in stale.all():
         has_tx = await db.scalar(
@@ -1306,13 +1306,18 @@ async def recover_guest(
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "already_claimed"})
     db.add(GuestEvent(user_id=user.id, name="anchor_recovery_accepted"))
+    token = generate_guest_token()
+    user.guest_token_hash = hash_secret(token)
+    await db.commit()
+    await db.refresh(user)
     access_token, refresh_token = await _issue_guest_session(
         db, request, response, user
     )
     return GuestResumeOut(
         user=_build_auth_out(
             user, access_token=access_token, refresh_token=refresh_token
-        )
+        ),
+        guest_token=token,
     )
 
 
@@ -1607,6 +1612,7 @@ async def claim_guest_with_passkey(
 
     prev_level = guest_protection_level(user)
     user.is_guest = False
+    user.email = None
     user.claimed_at = datetime.now(timezone.utc)
     # F7 — drop the now-meaningless L1/recovery hashes.
     user.guest_token_hash = None

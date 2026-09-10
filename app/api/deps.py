@@ -72,6 +72,16 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN, detail=blocked_message
         )
 
+    if (
+        getattr(user, "is_guest", False)
+        and not bool(getattr(platform_settings, "guest_mode_enabled", True))
+        and bool(getattr(platform_settings, "guest_mode_kill_existing", False))
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_mode_disabled"},
+        )
+
     auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
     is_bearer_auth = auth_header.strip().lower().startswith("bearer ")
 

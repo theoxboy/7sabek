@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -119,7 +119,7 @@ async def list_guests(
         .outerjoin(env_count, env_count.c.user_id == User.id)
         .outerjoin(tx_count, tx_count.c.user_id == User.id)
         .outerjoin(tx_expense, tx_expense.c.user_id == User.id)
-        .where(User.is_guest.is_(True), User.deleted_at.is_(None))
+        .where(or_(User.is_guest.is_(True), User.claimed_at.is_not(None)), User.deleted_at.is_(None))
     )
 
     if q and q.strip():
@@ -139,12 +139,13 @@ async def list_guests(
     elif status_filter == "stale":
         cutoff = datetime.now(timezone.utc) - timedelta(days=_STALE_DAYS)
         stmt = stmt.where(
+            User.is_guest.is_(True),
             User.claimed_at.is_(None),
             User.guest_created_at < cutoff,
             func.coalesce(tx_count.c.n, 0) == 0,
         )
     elif status_filter == "active":
-        stmt = stmt.where(User.claimed_at.is_(None))
+        stmt = stmt.where(User.is_guest.is_(True), User.claimed_at.is_(None))
 
     total = int(
         await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
@@ -206,7 +207,7 @@ async def get_guest(
         raise HTTPException(status_code=404, detail="NOT_FOUND")
 
     user = await db.get(User, user_uuid)
-    if user is None or not user.is_guest:
+    if user is None or (not user.is_guest and user.claimed_at is None):
         raise HTTPException(status_code=404, detail="NOT_FOUND")
 
     n_env = int(
@@ -328,6 +329,14 @@ async def purge_guest(
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     try:
+        await create_admin_log(
+            db,
+            event_type="guest_purged",
+            status="success",
+            message=f"Invité {guest_id} purgé par un superadmin",
+            actor_email=current_user.email,
+            actor_ip=get_client_ip(request),
+        )
         await _purge_guest_owned_rows(db, user.id)
         await db.execute(
             update(User)
@@ -342,17 +351,5 @@ async def purge_guest(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la purge de l'invité: {exc}",
         )
-
-    try:
-        await create_admin_log(
-            db,
-            event_type="guest_purged",
-            status="success",
-            message=f"Invité {guest_id} purgé par un superadmin",
-            actor_email=current_user.email,
-            actor_ip=get_client_ip(request),
-        )
-    except Exception:
-        pass
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
