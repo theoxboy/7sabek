@@ -32,6 +32,7 @@ def eligible_query(points_field):
             User.deleted_at.is_(None),
             User.leaderboard_name.isnot(None),
             User.leaderboard_name != "",
+            User.is_guest.is_(False),
         )
     )
 
@@ -59,28 +60,34 @@ async def build_leaderboard(
         )
         rank += 1
 
-    gf = await get_or_create_gamification(db, current_user.id)
-    opt_in = True
-    user_rank = None
-    user_points = None
-    if current_user.leaderboard_name:
-        points_value = int(getattr(gf, points_field.key))
-        count_result = await db.execute(
-            select(func.count())
-            .select_from(User)
-            .join(UserGamification, UserGamification.user_id == User.id)
-            .where(
-                User.role == "user",
-                User.status == "active",
-                User.deleted_at.is_(None),
-                User.leaderboard_name.isnot(None),
-                User.leaderboard_name != "",
-                points_field > points_value,
+    if getattr(current_user, "is_guest", False):
+        opt_in = False
+        user_rank = None
+        user_points = None
+    else:
+        gf = await get_or_create_gamification(db, current_user.id)
+        opt_in = True
+        user_rank = None
+        user_points = None
+        if current_user.leaderboard_name:
+            points_value = int(getattr(gf, points_field.key))
+            count_result = await db.execute(
+                select(func.count())
+                .select_from(User)
+                .join(UserGamification, UserGamification.user_id == User.id)
+                .where(
+                    User.role == "user",
+                    User.status == "active",
+                    User.deleted_at.is_(None),
+                    User.leaderboard_name.isnot(None),
+                    User.leaderboard_name != "",
+                    User.is_guest.is_(False),
+                    points_field > points_value,
+                )
             )
-        )
-        ahead = int(count_result.scalar_one())
-        user_rank = ahead + 1
-        user_points = points_value
+            ahead = int(count_result.scalar_one())
+            user_rank = ahead + 1
+            user_points = points_value
 
     return LeaderboardOut(
         period=period,

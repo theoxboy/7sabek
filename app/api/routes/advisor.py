@@ -8,8 +8,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -138,6 +137,26 @@ async def advisor_accept(
 ) -> AdvisorAcceptOut:
     if payload.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ADVISOR_USER_MISMATCH")
+
+    if current_user.is_guest:
+        from app.core.guest import GUEST_MAX_ENVELOPES
+        existing_count = await db.scalar(
+            select(func.count()).select_from(Envelope).where(Envelope.user_id == current_user.id)
+        )
+        if (existing_count or 0) >= GUEST_MAX_ENVELOPES:
+            from app.models import GuestEvent
+            db.add(
+                GuestEvent(
+                    user_id=current_user.id,
+                    name="guest_wall_hit",
+                    meta={"wall": "envelopes_cap", "limit": GUEST_MAX_ENVELOPES, "route": "/advisor"},
+                )
+            )
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "guest_quota", "resource": "envelopes", "limit": GUEST_MAX_ENVELOPES},
+            )
 
     service = AcceptService(
         decisions=AdvisorDecisionRepository(),
@@ -542,6 +561,15 @@ async def advisor_chat(
             )
         )
         if (used_today or 0) >= GUEST_ADVISOR_MESSAGES_PER_DAY:
+            from app.models import GuestEvent
+            db.add(
+                GuestEvent(
+                    user_id=current_user.id,
+                    name="guest_wall_hit",
+                    meta={"wall": "advisor_daily", "limit": GUEST_ADVISOR_MESSAGES_PER_DAY, "route": "/advisor"},
+                )
+            )
+            await db.commit()
             raise HTTPException(
                 status_code=403,
                 detail={

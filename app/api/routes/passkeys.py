@@ -237,6 +237,14 @@ async def passkey_register_options(
     db: AsyncSession = Depends(get_db),
 ) -> PasskeyRegisterOptionsOut:
     _ensure_enabled()
+    if getattr(user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "guest_feature_locked",
+                "message": "Use /auth/guest/claim-passkey to claim a guest account with a passkey.",
+            },
+        )
     _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-register-options", limit=15, window_seconds=60)
     user_label = _safe_user_label(user)
@@ -351,6 +359,14 @@ async def passkey_register_verify(
     db: AsyncSession = Depends(get_db),
 ) -> PasskeyRegisterVerifyOut:
     _ensure_enabled()
+    if getattr(user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "guest_feature_locked",
+                "message": "Use /auth/guest/claim-passkey to claim a guest account with a passkey.",
+            },
+        )
     _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-register-verify", limit=20, window_seconds=60)
     user_label = _safe_user_label(user)
@@ -819,6 +835,8 @@ async def list_passkeys(
     db: AsyncSession = Depends(get_db),
 ) -> list[PasskeyOut]:
     _ensure_enabled()
+    if getattr(user, "is_guest", False):
+        return []
     _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-list", limit=30, window_seconds=60)
     user_label = _safe_user_label(user)
@@ -876,6 +894,11 @@ async def delete_passkey(
     db: AsyncSession = Depends(get_db),
 ) -> PasskeyDeleteOut:
     _ensure_enabled()
+    if getattr(user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "message": "Guest accounts have no passkeys."},
+        )
     _ensure_user_allowed(user)
     await enforce_rate_limit(db, request, "passkeys-delete", limit=20, window_seconds=60)
     result = await db.execute(

@@ -252,6 +252,9 @@ async def apply_transaction_scoring(
     user: User,
     transaction: Transaction,
 ) -> None:
+    if getattr(user, "is_guest", False):
+        return
+
     gf = await get_or_create_gamification(db, user.id)
     local_day = to_local_date(transaction.created_at or datetime.now(timezone.utc))
 

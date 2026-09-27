@@ -547,6 +547,7 @@ async def search_users_for_email_center(
         select(User)
         .where(
             User.deleted_at.is_(None),
+            User.is_guest.is_(False),
             (
                 User.email.ilike(ilike_value)
                 | User.first_name.ilike(ilike_value)
@@ -954,7 +955,11 @@ async def _fetch_audience_users(
     audience_type: str,
     warnings: List[str],
 ) -> List[User]:
-    base_query = select(User).where(User.deleted_at.is_(None), User.status == "active")
+    base_query = select(User).where(
+        User.deleted_at.is_(None),
+        User.status == "active",
+        User.is_guest.is_(False),
+    )
 
     if audience_type == "all_users" or audience_type == "by_language":
         result = await db.execute(base_query.order_by(User.created_at.desc()))

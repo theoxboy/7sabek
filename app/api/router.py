@@ -62,7 +62,9 @@ api_router.include_router(
 api_router.include_router(logs_router, tags=["logs"])
 api_router.include_router(gamification_router, tags=["gamification"])
 api_router.include_router(leaderboard_router, tags=["leaderboard"])
-api_router.include_router(categories_router, tags=["categories"])
+api_router.include_router(
+    categories_router, tags=["categories"], dependencies=_GUEST_LOCKED
+)
 api_router.include_router(mappings_router, tags=["mappings"])
 api_router.include_router(transactions_router, tags=["transactions"])
 api_router.include_router(sweeps_router, tags=["sweeps"], dependencies=_GUEST_LOCKED)
@@ -79,5 +81,5 @@ api_router.include_router(email_center_router, tags=["email-center"])
 api_router.include_router(email_public_router, tags=["email-public"])
 api_router.include_router(registration_leads_router, tags=["registration-leads"])
 api_router.include_router(contact_messages_router, tags=["contact-messages"])
-api_router.include_router(nlp_router, tags=["nlp"], dependencies=_GUEST_LOCKED)
+api_router.include_router(nlp_router, tags=["nlp"])
 api_router.include_router(ai_router, tags=["ai"], dependencies=_GUEST_LOCKED)

@@ -75,7 +75,8 @@ def test_guest_funnel_counts_the_journey(client: TestClient, database_url: str) 
     walls = {w["wall"]: w for w in d["per_wall"]}
     assert set(walls) == {
         "envelopes_cap", "advisor_daily", "reports", "goals",
-        "debts", "export", "history", "multi_device",
+        "debts", "distribution", "sweeps", "notifications",
+        "export", "history", "multi_device",
     }
     assert walls["reports"]["hits"] >= 1
     assert walls["reports"]["dialog_opened"] >= 1

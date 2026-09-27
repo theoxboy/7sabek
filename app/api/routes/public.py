@@ -96,6 +96,8 @@ async def get_platform_status(
         guest_mode_message_type=getattr(settings, "guest_mode_message_type", "info") or "info",
         guest_mode_fallback_cta=bool(getattr(settings, "guest_mode_fallback_cta", True)),
         guest_mode_placements=list(
-            getattr(settings, "guest_mode_placements", None) or ["login", "register"]
+            ["login", "register", "android"]
+            if getattr(settings, "guest_mode_placements", None) in (None, ["login", "register"])
+            else getattr(settings, "guest_mode_placements")
         ),
     )

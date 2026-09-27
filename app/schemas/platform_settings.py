@@ -93,7 +93,7 @@ class PlatformSettingsOut(BaseModel):
     guest_mode_message_ar: str = ""
     guest_mode_message_type: str = "info"
     guest_mode_fallback_cta: bool = True
-    guest_mode_placements: list[str] = Field(default_factory=lambda: ["login", "register"])
+    guest_mode_placements: list[str] = Field(default_factory=lambda: ["login", "register", "android"])
     guest_mode_kill_existing: bool = False
 
 
@@ -173,4 +173,4 @@ class PlatformStatusOut(BaseModel):
     guest_mode_message_ar: str = ""
     guest_mode_message_type: str = "info"
     guest_mode_fallback_cta: bool = True
-    guest_mode_placements: list[str] = Field(default_factory=lambda: ["login", "register"])
+    guest_mode_placements: list[str] = Field(default_factory=lambda: ["login", "register", "android"])

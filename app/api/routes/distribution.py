@@ -748,6 +748,11 @@ async def create_distribution_rule(
         if envelope_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=400, detail="invalid envelope target")
     else:
+        if getattr(current_user, "is_guest", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "guest_feature_locked", "feature": "goals"},
+            )
         goal_result = await db.execute(
             select(Goal).where(
                 Goal.user_id == current_user.id,
@@ -1899,6 +1904,12 @@ async def update_distribution_config(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DistributionConfigOut:
+    if payload.goals and getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "goals"},
+        )
+
     percent_total = Decimal("0.00")
     items: list[tuple[str, DistributionConfigItemOut]] = []
 

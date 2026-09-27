@@ -123,6 +123,11 @@ async def get_my_email_preferences(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> EmailPreferenceOut:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "notifications"},
+        )
     if not get_settings().email_center_preferences_enabled:
         raise HTTPException(status_code=403, detail="Email preferences disabled")
     item = await get_or_create_email_preferences(db, current_user.id)
@@ -135,6 +140,11 @@ async def patch_my_email_preferences(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> EmailPreferenceOut:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "notifications"},
+        )
     if not get_settings().email_center_preferences_enabled:
         raise HTTPException(status_code=403, detail="Email preferences disabled")
     item = await update_email_preferences(db, current_user.id, payload.model_dump(exclude_unset=True))
@@ -352,7 +362,11 @@ async def get_admin_summary(
 ) -> AdminSummaryOut:
     if current_user.role != "superadmin":
         raise HTTPException(status_code=403, detail="Forbidden")
-    user_count = await db.scalar(select(func.count()).select_from(User))
+    user_count = await db.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(User.is_guest.is_(False), User.deleted_at.is_(None))
+    )
     category_count = await db.scalar(select(func.count()).select_from(Category))
     envelope_count = await db.scalar(select(func.count()).select_from(Envelope))
     transaction_count = await db.scalar(select(func.count()).select_from(Transaction))
@@ -382,7 +396,11 @@ async def get_admin_top_clients(
             func.coalesce(func.sum(Transaction.amount), 0).label("income_total"),
         )
         .join(Transaction, Transaction.user_id == User.id)
-        .where(Transaction.type == TransactionType.INCOME)
+        .where(
+            User.is_guest.is_(False),
+            User.deleted_at.is_(None),
+            Transaction.type == TransactionType.INCOME,
+        )
         .group_by(User.id, User.email, User.first_name, User.last_name)
         .order_by(desc("income_total"))
         .limit(limit)
@@ -398,6 +416,10 @@ async def get_admin_top_clients(
                 func.coalesce(func.sum(Transaction.amount), 0).label("income_total"),
             )
             .join(Transaction, Transaction.user_id == User.id)
+            .where(
+                User.is_guest.is_(False),
+                User.deleted_at.is_(None),
+            )
             .group_by(User.id, User.email, User.first_name, User.last_name)
             .order_by(desc("income_total"))
             .limit(limit)
@@ -485,6 +507,7 @@ async def list_users(
     limit: int = 50,
     offset: int = 0,
     include_deleted: bool = False,
+    include_guests: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[UserOut]:
@@ -493,6 +516,8 @@ async def list_users(
     query = select(User).order_by(User.created_at.desc())
     if not include_deleted:
         query = query.where(User.deleted_at.is_(None))
+    if not include_guests:
+        query = query.where(User.is_guest.is_(False))
     if q:
         needle = f"%{q.strip().lower()}%"
         query = query.where(
@@ -511,6 +536,11 @@ async def delete_user(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> None:
+    if current_user.is_guest:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "use_guest_delete", "message": "Use DELETE /auth/guest to delete guest accounts"},
+        )
     if current_user.deleted_at is None:
         current_user.deleted_at = datetime.now(timezone.utc)
         await db.commit()
@@ -526,6 +556,11 @@ async def create_my_onboarding_v2_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> OnboardingV2RecordOut:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "money-plan"},
+        )
     answers = normalize_onboarding_answers(payload.answers)
     validation_errors = validate_onboarding_answers(answers)
     if validation_errors and (payload.stage or "in_progress") in {"review", "completed"}:
@@ -573,6 +608,11 @@ async def upsert_my_latest_onboarding_v2_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> OnboardingV2RecordOut:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "money-plan"},
+        )
     answers = normalize_onboarding_answers(payload.answers)
     validation_errors = validate_onboarding_answers(answers)
     if validation_errors and (payload.stage or "in_progress") in {"review", "completed"}:
@@ -662,6 +702,11 @@ async def apply_my_latest_onboarding_v2_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> OnboardingV2ApplyOut:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "money-plan"},
+        )
     result = await db.execute(
         select(OnboardingV2Record)
         .where(OnboardingV2Record.user_id == current_user.id)
@@ -769,6 +814,8 @@ async def list_my_onboarding_v2_records(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[OnboardingV2RecordOut]:
+    if getattr(current_user, "is_guest", False):
+        return []
     safe_limit = max(1, min(limit, 100))
     result = await db.execute(
         select(OnboardingV2Record)
@@ -787,6 +834,20 @@ async def get_my_shiftpilot_state(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ShiftPilotStateOut:
+    if getattr(current_user, "is_guest", False):
+        from app.models import GuestEvent
+        db.add(
+            GuestEvent(
+                user_id=current_user.id,
+                name="guest_wall_hit",
+                meta={"wall": "reports", "route": "/shiftpilot"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "reports"},
+        )
     result = await db.execute(
         select(UserShiftPilotState).where(
             UserShiftPilotState.user_id == current_user.id
@@ -807,6 +868,20 @@ async def upsert_my_shiftpilot_state(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ShiftPilotStateOut:
+    if getattr(current_user, "is_guest", False):
+        from app.models import GuestEvent
+        db.add(
+            GuestEvent(
+                user_id=current_user.id,
+                name="guest_wall_hit",
+                meta={"wall": "reports", "route": "/shiftpilot"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "feature": "reports"},
+        )
     normalized_payload = _normalize_shiftpilot_payload(payload.payload)
     result = await db.execute(
         select(UserShiftPilotState).where(
@@ -1642,6 +1717,15 @@ async def update_user_profile(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> UserOut:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "guest_feature_locked",
+                "message": "Guest accounts cannot update profile details. Create a free account to customize your profile.",
+            },
+        )
+
     try:
         normalized_profile_photo_url = normalize_profile_photo_url(payload.profile_photo_url)
     except ValueError as exc:
@@ -1714,6 +1798,21 @@ async def export_user_data(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Response:
+    if getattr(current_user, "is_guest", False):
+        from app.models import GuestEvent
+        db.add(
+            GuestEvent(
+                user_id=current_user.id,
+                name="guest_wall_hit",
+                meta={"wall": "export", "route": "/settings"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_feature_locked", "message": "Guest accounts cannot export data."},
+        )
+
     export_format = format.lower()
     if export_format not in {"json", "csv"}:
         raise HTTPException(status_code=400, detail="format must be json or csv")
@@ -1756,7 +1855,7 @@ async def export_user_data(
     payload = {
         "user": {
             "id": str(current_user.id),
-            "email": current_user.email,
+            "email": None if bool(getattr(current_user, "is_guest", False)) else current_user.email,
             "currency": current_user.currency,
             "sweep_interval_days": current_user.sweep_interval_days,
             "first_name": current_user.first_name,
@@ -1816,6 +1915,11 @@ async def reset_user_data(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> None:
+    if getattr(current_user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "use_guest_delete", "message": "Pour réinitialiser une session invité, supprimez-la via DELETE /auth/guest."},
+        )
     user_id = current_user.id
     await db.execute(delete(DistributionLog).where(DistributionLog.user_id == user_id))
     await db.execute(delete(DistributionRule).where(DistributionRule.user_id == user_id))

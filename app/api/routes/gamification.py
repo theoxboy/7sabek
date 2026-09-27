@@ -67,6 +67,27 @@ async def get_summary(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> GamificationSummaryOut:
+    if getattr(current_user, "is_guest", False):
+        today = to_local_date(datetime.now(timezone.utc))
+        return GamificationSummaryOut(
+            points_total=0,
+            points_weekly=0,
+            points_monthly=0,
+            current_streak_days=0,
+            longest_streak_days=0,
+            freeze_tokens=0,
+            freeze_pending=False,
+            freeze_pending_date=None,
+            level=1,
+            level_label="L1",
+            level_progress=0.0,
+            next_level_points=100,
+            leaderboard_opt_in=False,
+            display_name=display_name_for_user(current_user),
+            week_start=week_start(today),
+            month_start=month_start(today),
+        )
+
     gf = await get_or_create_gamification(db, current_user.id)
     today = to_local_date(datetime.now(timezone.utc))
     await ensure_period_rollover(db, gf, today)
@@ -118,6 +139,9 @@ async def list_logs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[GamificationLogOut]:
+    if getattr(current_user, "is_guest", False):
+        return []
+
     result = await db.execute(
         select(PointsLog)
         .where(PointsLog.user_id == current_user.id)
@@ -145,8 +169,15 @@ async def reset_weekly(
 
     today = to_local_date(datetime.now(timezone.utc))
     current_week = week_start(today)
+    active_users_subq = (
+        select(User.id).where(
+            User.is_guest.is_(False),
+            User.deleted_at.is_(None),
+        ).scalar_subquery()
+    )
     await db.execute(
         UserGamification.__table__.update()
+        .where(UserGamification.user_id.in_(active_users_subq))
         .values(
             points_weekly=0,
             week_start=current_week,
@@ -176,8 +207,16 @@ async def reset_monthly(
 
     today = to_local_date(datetime.now(timezone.utc))
     current_month = month_start(today)
+    active_users_subq = (
+        select(User.id).where(
+            User.is_guest.is_(False),
+            User.deleted_at.is_(None),
+        ).scalar_subquery()
+    )
     await db.execute(
-        UserGamification.__table__.update().values(
+        UserGamification.__table__.update()
+        .where(UserGamification.user_id.in_(active_users_subq))
+        .values(
             points_monthly=0,
             month_start=current_month,
         )

@@ -24,8 +24,12 @@ async def check_account_existence(
         return {"exists": False}
 
     stmt = select(User.id).where(
-        (func.lower(User.email) == contact_clean.lower()) |
-        (User.phone_number == contact_clean)
+        User.deleted_at.is_(None),
+        User.is_guest.is_(False),
+        (
+            (func.lower(User.email) == contact_clean.lower())
+            | (User.phone_number == contact_clean)
+        ),
     )
     result = await db.execute(stmt)
     user_id = result.scalars().first()
@@ -55,8 +59,12 @@ async def submit_contact_message(
     # Check if a user matches
     info_clean = payload.contact_info.strip()
     user_stmt = select(User.id).where(
-        (func.lower(User.email) == info_clean.lower()) |
-        (User.phone_number == info_clean)
+        User.deleted_at.is_(None),
+        User.is_guest.is_(False),
+        (
+            (func.lower(User.email) == info_clean.lower())
+            | (User.phone_number == info_clean)
+        ),
     )
     user_result = await db.execute(user_stmt)
     matching_user_id = user_result.scalars().first()

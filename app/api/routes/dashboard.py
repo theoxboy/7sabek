@@ -547,7 +547,9 @@ async def get_dashboard_alerts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DashboardAlertOut:
-    await ensure_system_category_mappings(db, current_user.id, repair=True)
+    await ensure_system_category_mappings(
+        db, current_user.id, repair=not getattr(current_user, "is_guest", False)
+    )
     period_start, period_end = await _resolve_period_bounds(
         db, current_user, start, end
     )

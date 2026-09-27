@@ -18,7 +18,9 @@ async def list_mappings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[CategoryEnvelopeMapOut]:
-    await ensure_system_category_mappings(db, current_user.id, repair=True)
+    await ensure_system_category_mappings(
+        db, current_user.id, repair=not getattr(current_user, "is_guest", False)
+    )
     result = await db.execute(
         select(CategoryEnvelopeMap).where(
             CategoryEnvelopeMap.user_id == current_user.id

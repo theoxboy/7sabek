@@ -77,6 +77,7 @@ _GUEST_EVENT_NAMES = {
     "guest_post_ack_prompt_shown",
     "guest_post_ack_prompt_converted",
     "guest_post_ack_prompt_dismissed",
+    "guest_cta_click",
 }
 
 # The conversion "walls" a guest can hit, in the order shown on the dashboard.
@@ -86,10 +87,25 @@ _GUEST_WALLS = (
     "reports",
     "goals",
     "debts",
+    "distribution",
+    "sweeps",
+    "notifications",
     "export",
     "history",
     "multi_device",
 )
+
+_WALL_ALIASES = {
+    "savings_goals": "goals",
+    "debts_and_loans": "debts",
+    "analytics": "reports",
+}
+
+_WALL_MATCH_NAMES = {
+    "goals": ["goals", "savings_goals"],
+    "debts": ["debts", "debts_and_loans"],
+    "reports": ["reports", "analytics"],
+}
 
 
 @router.post("/guest-event", status_code=status.HTTP_201_CREATED)
@@ -108,6 +124,14 @@ async def create_guest_event(
     meta = payload.get("meta")
     if not isinstance(meta, dict):
         meta = None
+    elif meta:
+        meta = dict(meta)
+        if "wall" in meta and meta["wall"] in _WALL_ALIASES:
+            meta["wall"] = _WALL_ALIASES[meta["wall"]]
+        if "source" in meta and isinstance(meta["source"], str) and meta["source"].startswith("wall:"):
+            wall_sub = meta["source"][5:]
+            if wall_sub in _WALL_ALIASES:
+                meta["source"] = f"wall:{_WALL_ALIASES[wall_sub]}"
     db.add(GuestEvent(user_id=current_user.id, name=name, meta=meta))
     await db.commit()
     return {"ok": True}
@@ -197,12 +221,14 @@ async def guest_funnel(
 
     per_wall: list[GuestFunnelWallPoint] = []
     for wall in _GUEST_WALLS:
+        wall_names = _WALL_MATCH_NAMES.get(wall, [wall])
+        wall_sources = [f"wall:{w}" for w in wall_names]
         hits = int(
             await db.scalar(
                 select(func.count(func.distinct(GuestEvent.user_id))).where(
                     GuestEvent.name == "guest_wall_hit",
                     GuestEvent.created_at >= start_dt,
-                    GuestEvent.meta["wall"].astext == wall,
+                    GuestEvent.meta["wall"].astext.in_(wall_names),
                 )
             )
             or 0
@@ -212,7 +238,7 @@ async def guest_funnel(
                 select(func.count(func.distinct(GuestEvent.user_id))).where(
                     GuestEvent.name == "guest_claim_dialog_opened",
                     GuestEvent.created_at >= start_dt,
-                    GuestEvent.meta["source"].astext == f"wall:{wall}",
+                    GuestEvent.meta["source"].astext.in_(wall_sources),
                 )
             )
             or 0
@@ -226,7 +252,7 @@ async def guest_funnel(
                         select(GuestEvent.user_id).where(
                             GuestEvent.name == "guest_wall_hit",
                             GuestEvent.created_at >= start_dt,
-                            GuestEvent.meta["wall"].astext == wall,
+                            GuestEvent.meta["wall"].astext.in_(wall_names),
                         )
                     ),
                 )

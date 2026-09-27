@@ -137,6 +137,10 @@ class WebLoginTokenOut(BaseModel):
     expires_at: datetime
 
 
+class RefreshTokenIn(BaseModel):
+    refresh_token: Optional[str] = None
+
+
 class WebLoginExchangeIn(BaseModel):
     token: str
     geo_lat: Optional[float] = None

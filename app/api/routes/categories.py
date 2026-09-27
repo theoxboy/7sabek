@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import forbid_guest, get_current_user
 from app.db.session import get_db
 from app.models import Category, CategoryEnvelopeMap, Envelope, Transaction, User
 from app.schemas.category import (
@@ -69,7 +69,7 @@ async def _find_category_name_conflict(
 async def create_category(
     payload: CategoryCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> CategoryOut:
     normalized_name = normalize_name(payload.name)
     if not normalized_name:
@@ -119,7 +119,7 @@ async def category_eligibility_signals(
 async def self_heal_categories(
     dry_run: bool = False,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> dict[str, int]:
     answers = await latest_onboarding_answers_for_user(db, current_user.id)
     eligible_keys = eligible_expense_category_keys_from_answers(answers)
@@ -231,7 +231,7 @@ async def update_category(
     category_id: UUID,
     payload: CategoryUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> CategoryOut:
     result = await db.execute(
         select(Category).where(
@@ -264,7 +264,7 @@ async def update_category(
 async def delete_category(
     category_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> None:
     result = await db.execute(
         select(Category).where(
@@ -301,7 +301,7 @@ async def upsert_category_envelope_mapping(
     category_id: UUID,
     payload: CategoryEnvelopeMapUpsert,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> CategoryEnvelopeMapOut:
     unmapped_before = await count_manual_unmapped_categories(db, current_user.id)
 
@@ -380,7 +380,7 @@ async def upsert_category_envelope_mapping(
 async def delete_category_envelope_mapping(
     category_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_guest),
 ) -> None:
     category_result = await db.execute(
         select(Category).where(

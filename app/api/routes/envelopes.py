@@ -174,6 +174,19 @@ async def create_envelope(
         envelope.rollover_enabled = True
 
     db.add(envelope)
+
+    if current_user.is_guest:
+        from app.models import GuestEvent
+
+        prior_envelope_event = await db.scalar(
+            select(func.count()).select_from(GuestEvent).where(
+                GuestEvent.user_id == current_user.id,
+                GuestEvent.name == "guest_first_envelope",
+            )
+        )
+        if (prior_envelope_event or 0) == 0:
+            db.add(GuestEvent(user_id=current_user.id, name="guest_first_envelope"))
+
     await db.commit()
     await db.refresh(envelope)
 

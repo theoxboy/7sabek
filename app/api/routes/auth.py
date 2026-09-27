@@ -114,6 +114,7 @@ from app.schemas.auth import (
     SuperadminSessionOut,
     SuperadminSessionStateOut,
     StatusOut,
+    RefreshTokenIn,
     WebLoginTokenOut,
     WebLoginExchangeIn,
 )
@@ -1009,7 +1010,7 @@ async def _purge_stale_empty_guests(db: AsyncSession, *, older_than_days: int = 
     (F16). Any of those and the guest is kept. Bounded per call so it never
     blocks guest creation.
     """
-    from app.models import EnvelopeAllocation, Transaction
+    from app.models import DistributionSavedConfig, EnvelopeAllocation, Transaction
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     stale = await db.execute(
@@ -1033,6 +1034,22 @@ async def _purge_stale_empty_guests(db: AsyncSession, *, older_than_days: int = 
             )
         )
         if (has_alloc or 0) > 0:
+            continue
+        has_dist = await db.scalar(
+            select(func.count()).select_from(DistributionSavedConfig).where(
+                DistributionSavedConfig.user_id == uid
+            )
+        )
+        if (has_dist or 0) > 0:
+            continue
+        from app.models import Envelope as _Env
+        custom_env_count = await db.scalar(
+            select(func.count()).select_from(_Env).where(
+                _Env.user_id == uid,
+                _Env.name.notin_(["Epargnes", "Cash", "Loyer", "Courses", "Transport"]),
+            )
+        )
+        if (custom_env_count or 0) > 0:
             continue
         target = await db.get(User, uid)
         if target is not None:
@@ -1305,6 +1322,14 @@ async def recover_guest(
         raise HTTPException(status_code=404, detail={"code": "guest_not_found"})
     if not user.is_guest:
         raise HTTPException(status_code=409, detail={"code": "already_claimed"})
+    _ps = await get_platform_settings(db)
+    if not bool(getattr(_ps, "guest_mode_enabled", True)) and bool(
+        getattr(_ps, "guest_mode_kill_existing", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "guest_mode_disabled"},
+        )
     db.add(GuestEvent(user_id=user.id, name="anchor_recovery_accepted"))
     token = generate_guest_token()
     user.guest_token_hash = hash_secret(token)
@@ -1472,9 +1497,17 @@ async def claim_guest_account(
         raise HTTPException(status_code=409, detail={"code": "not_a_guest"})
 
     await enforce_rate_limit(db, request, "guest_claim", 5, 3600)
-    await _verify_recaptcha_or_400(request, payload.recaptcha_token)
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    is_bearer_auth = auth_header.strip().lower().startswith("bearer ")
+    if not is_bearer_auth or payload.recaptcha_token:
+        await _verify_recaptcha_or_400(request, payload.recaptcha_token)
 
     platform_settings = await get_platform_settings(db)
+    if not platform_settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Les inscriptions sont temporairement fermées.",
+        )
     password_error = validate_password_easy(
         payload.password, max(platform_settings.password_min_length, 8)
     )
@@ -1601,6 +1634,13 @@ async def claim_guest_with_passkey(
 
     await enforce_rate_limit(db, request, "guest_claim", 5, 3600)
 
+    platform_settings = await get_platform_settings(db)
+    if not platform_settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Les inscriptions sont temporairement fermées.",
+        )
+
     passkey_count = await db.scalar(
         select(func.count()).select_from(UserPasskey).where(
             UserPasskey.user_id == user.id,
@@ -1654,6 +1694,7 @@ async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
         DistributionRule,
         DistributionRun,
         DistributionSavedConfig,
+        EmailPreference,
         Envelope,
         EnvelopeAdjustmentLog,
         EnvelopeAllocation,
@@ -1716,6 +1757,7 @@ async def _purge_guest_owned_rows(db: AsyncSession, user_id) -> None:
         AdvisorPreApplyValidation,
         UserShiftPilotState,
         UserCategoryPreference,
+        EmailPreference,
         OnboardingV2Record,
         PageView,
     )
@@ -1756,10 +1798,14 @@ async def delete_guest_data(
 async def refresh(
     request: Request,
     response: Response,
+    payload: Optional[RefreshTokenIn] = None,
     db: AsyncSession = Depends(get_db),
 ) -> AuthOut:
     platform_settings = await get_platform_settings(db)
-    refresh_token = request.cookies.get("refresh_token")
+    refresh_token = (
+        (payload.refresh_token if payload and payload.refresh_token else None)
+        or request.cookies.get("refresh_token")
+    )
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Missing refresh token")
     try:
@@ -1791,19 +1837,24 @@ async def refresh(
     if user.must_reset_password:
         raise HTTPException(status_code=403, detail="PASSWORD_RESET_REQUIRED")
 
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    is_bearer_client = bool(payload and payload.refresh_token) or auth_header.strip().lower().startswith("bearer ")
+
     session_token = request.cookies.get(SUPERADMIN_SESSION_COOKIE)
     if user.role == "superadmin":
-        await require_active_superadmin_session(request, db, user, touch=True)
+        if not is_bearer_client:
+            await require_active_superadmin_session(request, db, user, touch=True)
     else:
-        await require_active_account_session(request, db, user, touch=True)
+        if not is_bearer_client:
+            await require_active_account_session(request, db, user, touch=True)
 
-    access_token, refresh_token = _set_auth_cookies(response, str(user.id))
+    access_token, new_refresh_token = _set_auth_cookies(response, str(user.id))
     if session_token:
         _set_superadmin_session_cookie(response, session_token)
     return _build_auth_out(
         user,
         access_token=access_token,
-        refresh_token=refresh_token,
+        refresh_token=new_refresh_token,
     )
 
 
@@ -1897,7 +1948,12 @@ async def request_password_reset(
         select(User).where(func.lower(User.email) == normalized_email)
     )
     user = result.scalar_one_or_none()
-    user_eligible = bool(user is not None and user.deleted_at is None and user.password_hash)
+    user_eligible = bool(
+        user is not None
+        and user.deleted_at is None
+        and user.password_hash
+        and not getattr(user, "is_guest", False)
+    )
     logger.info(
         "Password reset lookup result email_domain=%s user_eligible=%s",
         requested_domain,
@@ -1905,7 +1961,7 @@ async def request_password_reset(
     )
 
     # Do not leak account existence in production responses.
-    if user is not None and user.deleted_at is None and user.password_hash:
+    if user_eligible:
         now = datetime.now(timezone.utc)
         blocked_message = _build_password_reset_block_message(user, now)
         if blocked_message:
@@ -2032,7 +2088,7 @@ async def confirm_password_reset(
 
     user_result = await db.execute(select(User).where(User.id == token_record.user_id))
     user = user_result.scalar_one_or_none()
-    if user is None or user.deleted_at is not None:
+    if user is None or user.deleted_at is not None or getattr(user, "is_guest", False):
         token_record.used_at = now
         await db.commit()
         raise HTTPException(
@@ -2126,7 +2182,7 @@ async def password_reset_token_info(
         )
     user_result = await db.execute(select(User).where(User.id == token_record.user_id))
     user = user_result.scalar_one_or_none()
-    if user is None or user.deleted_at is not None:
+    if user is None or user.deleted_at is not None or getattr(user, "is_guest", False):
         return PasswordResetTokenInfoOut(
             status="ok",
             valid=False,
@@ -2260,6 +2316,24 @@ async def web_login_token(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WebLoginTokenOut:
+    if getattr(user, "is_guest", False):
+        from app.models import GuestEvent
+        db.add(
+            GuestEvent(
+                user_id=user.id,
+                name="guest_wall_hit",
+                meta={"wall": "multi_device", "route": "/web-login-token"},
+            )
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "guest_feature_locked",
+                "message": "Multi-device login requires creating a free account.",
+            },
+        )
+
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
     record = WebLoginToken(
@@ -2299,6 +2373,14 @@ async def web_login_exchange(
     user = await db.get(User, record.user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
+    if getattr(user, "is_guest", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "guest_feature_locked",
+                "message": "Guest accounts cannot be exchanged via web login token.",
+            },
+        )
 
     if user.role == "superadmin":
         validate_superadmin_geo(payload.geo_lat, payload.geo_lng)

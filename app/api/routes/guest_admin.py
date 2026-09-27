@@ -53,6 +53,8 @@ def _status_of(u: User, tx_count: int, alloc_count: int) -> str:
     )
     if age_days >= _STALE_DAYS and tx_count == 0 and alloc_count == 0:
         return "stale"
+    if u.recovery_code_ack_at is None and tx_count > 0:
+        return "at_risk"
     return "active"
 
 
@@ -144,6 +146,13 @@ async def list_guests(
             User.guest_created_at < cutoff,
             func.coalesce(tx_count.c.n, 0) == 0,
         )
+    elif status_filter == "at_risk":
+        stmt = stmt.where(
+            User.is_guest.is_(True),
+            User.claimed_at.is_(None),
+            User.recovery_code_ack_at.is_(None),
+            func.coalesce(tx_count.c.n, 0) > 0,
+        )
     elif status_filter == "active":
         stmt = stmt.where(User.is_guest.is_(True), User.claimed_at.is_(None))
 
@@ -174,9 +183,6 @@ async def list_guests(
                 country=user.country,
             )
         )
-
-    if status_filter == "at_risk":
-        rows = []  # fragile-context signal not tracked server-side yet
 
     next_cursor = str(offset + limit) if offset + limit < total else None
     return GuestAdminListOut(rows=rows, total=total, next_cursor=next_cursor)
