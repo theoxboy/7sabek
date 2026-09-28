@@ -509,6 +509,24 @@ async def apply_onboarding_v2_payload(
         "cash": "Cash",
     }
 
+    specific_housing_targets = [
+        _safe_string(e.get("envelope"))
+        for e in canonical_state.cycle_normalized_expenses_v1
+        if distribution_name_equivalent_key(_safe_string(e.get("envelope"))) in {"rent", "credit_logement"}
+        or _name_key(_safe_string(e.get("envelope"))) in {"loyer", "rent", "crédit logement", "credit logement"}
+    ]
+    specific_bills_targets = [
+        _safe_string(e.get("envelope"))
+        for e in canonical_state.cycle_normalized_expenses_v1
+        if distribution_name_equivalent_key(_safe_string(e.get("envelope"))) in {"phone_internet", "internet", "phone", "electricity", "water", "assurance"}
+        or _name_key(_safe_string(e.get("envelope"))) in {"internet/téléphone", "internet / téléphone", "téléphone", "telephone", "assurance"}
+    ]
+    expense_envelope_keys = {
+        _name_key(_safe_string(e.get("envelope")))
+        for e in canonical_state.cycle_normalized_expenses_v1
+        if _safe_decimal(e.get("per_cycle_amount")) and _safe_decimal(e.get("per_cycle_amount")) > 0
+    }
+
     for item in canonical_state.selected_envelopes:
         original_name = _safe_string(item.get("name"))
         final_name = _safe_string(item.get("final_name")) or original_name
@@ -523,6 +541,50 @@ async def apply_onboarding_v2_payload(
         if _name_key(final_name) in {"cash", "epargnes"}:
             continue
         if _safe_string(item.get("group_key")) == "goals":
+            continue
+
+        # Safeguard: prevent creating unfunded generic duplicate envelopes when specific ones exist
+        is_generic_housing = (
+            _name_key(final_name) in {"charges", "charges logement", "housing costs", "مصاريف السكن"}
+            or distribution_name_equivalent_key(final_name) == "housing_charges"
+        )
+        if (
+            is_generic_housing
+            and specific_housing_targets
+            and _name_key(final_name) not in expense_envelope_keys
+            and not item.get("custom_amount")
+        ):
+            target = specific_housing_targets[0]
+            envelope_name_aliases[_name_key(final_name)] = target
+            if original_name:
+                envelope_name_aliases[_name_key(original_name)] = target
+            continue
+
+        is_generic_bills = (
+            _name_key(final_name) in {"factures", "bills", "لفواتير", "الفواتير"}
+            or distribution_name_equivalent_key(final_name) == "bills"
+        )
+        if (
+            is_generic_bills
+            and specific_bills_targets
+            and _name_key(final_name) not in expense_envelope_keys
+            and not item.get("custom_amount")
+        ):
+            target = specific_bills_targets[0]
+            envelope_name_aliases[_name_key(final_name)] = target
+            if original_name:
+                envelope_name_aliases[_name_key(original_name)] = target
+            continue
+
+        is_generic_balance_buffer = (
+            _name_key(final_name) in {"equilibre", "balance", "التوازن"}
+            or distribution_name_equivalent_key(final_name) == "balance_buffer"
+        )
+        if (
+            is_generic_balance_buffer
+            and _name_key(final_name) not in expense_envelope_keys
+            and not item.get("custom_amount")
+        ):
             continue
 
         selected_envelope_name_keys.add(_name_key(final_name))
